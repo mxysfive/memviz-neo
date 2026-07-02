@@ -60,6 +60,25 @@ type Hover =
 const MARGIN = { top: 18, right: 18, bottom: 24, left: 12 };
 const TOOLBAR_H = 50;
 
+function eventTimeLabel(e: TraceEvent, data: TimelineData): string {
+  return data.time_axis === "event_ordinal"
+    ? `#${Math.round(e.time_us).toLocaleString()}`
+    : `${((e.time_us - data.time_min) / 1e6).toFixed(6)}s`;
+}
+
+function eventKind(action: string): string {
+  if (action.startsWith("segment_") || action === "segment_map" || action === "segment_unmap") return "segment";
+  if (action.startsWith("free")) return "free";
+  if (action === "alloc") return "alloc";
+  if (action === "oom") return "oom";
+  return "meta";
+}
+
+function formatEventTitle(e: TraceEvent): string {
+  if (e.action === "snapshot") return "snapshot";
+  return `${e.action} · ${formatBytes(e.size)}`;
+}
+
 function cloneSegments(input: Map<number, StateSegment>) {
   const out = new Map<number, StateSegment>();
   input.forEach((s, k) => out.set(k, { ...s }));
@@ -219,6 +238,7 @@ export default function AllocatorStateHistory({
   currentRank,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const eventsRef = useRef<HTMLDivElement>(null);
   const [eventIdx, setEventIdx] = useState(() => Math.max(0, traceEvents.length - 1));
   const [hover, setHover] = useState<Hover>(null);
   const framePool = useDataStore((s) => s.framePool);
@@ -242,13 +262,20 @@ export default function AllocatorStateHistory({
     [finalState, traceEvents, safeIdx],
   );
 
+  const listW = Math.max(260, Math.min(420, Math.round(width * 0.34)));
+  const rightW = Math.max(280, width - listW - 12);
   const canvasH = Math.max(180, height - TOOLBAR_H);
-  const plotW = Math.max(80, width - MARGIN.left - MARGIN.right);
+  const plotW = Math.max(80, rightW - MARGIN.left - MARGIN.right);
   const plotH = Math.max(80, canvasH - MARGIN.top - MARGIN.bottom);
   const segLayout = useMemo(
     () => layoutSegments(state.segments, plotW),
     [state.segments, plotW],
   );
+
+  useEffect(() => {
+    const row = eventsRef.current?.querySelector<HTMLElement>(`[data-event-idx="${safeIdx}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [safeIdx]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -256,14 +283,14 @@ export default function AllocatorStateHistory({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = width * dpr;
+    canvas.width = rightW * dpr;
     canvas.height = canvasH * dpr;
-    canvas.style.width = `${width}px`;
+    canvas.style.width = `${rightW}px`;
     canvas.style.height = `${canvasH}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, width, canvasH);
+    ctx.clearRect(0, 0, rightW, canvasH);
     ctx.fillStyle = COLOR_BG;
-    ctx.fillRect(0, 0, width, canvasH);
+    ctx.fillRect(0, 0, rightW, canvasH);
 
     const { scale, x, y } = viewRef.current;
     const rowH = Math.max(9, Math.min(30, plotH / Math.max(1, segLayout.rows)));
@@ -287,15 +314,15 @@ export default function AllocatorStateHistory({
       const sw = seg.size * xScale;
       if (sx + sw < MARGIN.left || sx > MARGIN.left + plotW) continue;
       if (sy + rowRectH < MARGIN.top || sy > MARGIN.top + plotH) continue;
-      ctx.fillStyle = "rgba(250,250,250,0.08)";
+      ctx.fillStyle = "rgba(250,250,250,0.07)";
       ctx.fillRect(sx, sy, sw, rowRectH);
-      ctx.strokeStyle = "rgba(250,250,250,0.18)";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(250,250,250,0.42)";
+      ctx.lineWidth = 1.2;
       ctx.strokeRect(sx, sy, sw, rowRectH);
       if (sw > 72 && rowRectH > 12) {
         ctx.font = FONT_MONO_SM;
-        ctx.fillStyle = COLOR_LABEL_DIM;
-        ctx.fillText(formatBytes(seg.size), sx + 4, sy + Math.min(rowRectH - 3, 12));
+        ctx.fillStyle = "rgba(250,250,250,0.72)";
+        ctx.fillText(`seg 0x${seg.addr.toString(16).slice(-6)} · ${formatBytes(seg.size)}`, sx + 4, sy + Math.min(rowRectH - 3, 12));
       }
     }
 
@@ -348,13 +375,13 @@ export default function AllocatorStateHistory({
     ctx.fillText(eventLabel, MARGIN.left, canvasH - 7);
     ctx.textAlign = "right";
     ctx.fillStyle = COLOR_LABEL_DIM;
-    ctx.fillText(`${segLayout.layout.length} segments`, width - MARGIN.right, canvasH - 7);
+    ctx.fillText(`${segLayout.layout.length} segments`, rightW - MARGIN.right, canvasH - 7);
 
     if (state.allocated > data.peak_bytes * 0.9 && data.peak_bytes > 0) {
       ctx.fillStyle = COLOR_PEAK;
       ctx.fillRect(MARGIN.left, 0, Math.min(plotW, (state.allocated / data.peak_bytes) * plotW), 2);
     }
-  }, [width, canvasH, plotW, plotH, segLayout, state, framePool, safeIdx, traceEvents, data.peak_bytes]);
+  }, [rightW, canvasH, plotW, plotH, segLayout, state, framePool, safeIdx, traceEvents, data.peak_bytes]);
 
   useEffect(() => { draw(); }, [draw, hover]);
 
@@ -423,18 +450,38 @@ export default function AllocatorStateHistory({
 
   const event = safeIdx >= 0 ? traceEvents[safeIdx] : null;
   const eventTime = event
-    ? data.time_axis === "event_ordinal"
-      ? `event #${Math.round(event.time_us).toLocaleString()}`
-      : `${((event.time_us - data.time_min) / 1e6).toFixed(6)}s`
+    ? eventTimeLabel(event, data)
     : "no events";
+  const eventFrame = event
+    ? formatTopFrame(event.top_frame_idx, framePool) || (event.addr ? `0x${event.addr.toString(16)}` : "")
+    : "";
 
   return (
-    <div className="state-history" style={{ width, height }}>
+    <div
+      className="state-history"
+      style={{ width, height }}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowDown") {
+          setEventIdx((i) => Math.min(traceEvents.length - 1, i + 1));
+          e.preventDefault();
+        } else if (e.key === "ArrowUp") {
+          setEventIdx((i) => Math.max(0, i - 1));
+          e.preventDefault();
+        } else if (e.key === "Home") {
+          setEventIdx(0);
+          e.preventDefault();
+        } else if (e.key === "End") {
+          setEventIdx(Math.max(0, traceEvents.length - 1));
+          e.preventDefault();
+        }
+      }}
+    >
       <div className="state-toolbar mono">
         <div className="state-toolbar-left">
           <span className="hl">R{String(currentRank).padStart(2, "0")}</span>
           <span className="faint">Allocator State</span>
-          <span>{eventTime}</span>
+          <span>{safeIdx >= 0 ? `${safeIdx + 1}/${traceEvents.length}` : "0/0"}</span>
         </div>
         <div className="state-controls">
           <button onClick={() => setEventIdx((i) => Math.max(0, i - 1))}>Prev</button>
@@ -461,46 +508,86 @@ export default function AllocatorStateHistory({
           <span className="faint">/ {formatBytes(state.reserved)} reserved</span>
         </div>
       </div>
-      <div style={{ position: "relative", width, height: canvasH }}>
-        <canvas
-          ref={canvasRef}
-          className="tl-canvas"
-          style={{ cursor: dragRef.current ? "grabbing" : "grab" }}
-          onMouseDown={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            dragRef.current = {
-              x: e.clientX - rect.left,
-              y: e.clientY - rect.top,
-              ox: viewRef.current.x,
-              oy: viewRef.current.y,
-              moved: false,
-            };
-          }}
-          onMouseMove={handleMouseMove}
-          onMouseUp={() => {
-            suppressClickRef.current = !!dragRef.current?.moved;
-            dragRef.current = null;
-          }}
-          onMouseLeave={() => { dragRef.current = null; setHover(null); }}
-          onDoubleClick={() => { viewRef.current = { scale: 1, x: 0, y: 0 }; draw(); }}
-          onWheel={handleWheel}
-          onClick={() => {
-            if (suppressClickRef.current) {
-              suppressClickRef.current = false;
-              return;
-            }
-            if (hover?.kind === "block" && hover.block.alloc_us >= 0) {
-              setSelectedAlloc({ addr: hover.block.addr, alloc_us: hover.block.alloc_us });
-            }
-          }}
-        />
-        {hover && (
-          <StateHoverCard
-            hover={hover}
-            framePool={framePool}
-            containerW={width}
+      <div className="state-split" style={{ height: canvasH }}>
+        <div
+          ref={eventsRef}
+          className="state-events"
+          style={{ width: listW }}
+        >
+          {traceEvents.map((e, i) => {
+            const selected = i === safeIdx;
+            const frame = formatTopFrame(e.top_frame_idx, framePool);
+            return (
+              <button
+                key={`${i}-${e.action}-${e.addr}-${e.time_us}`}
+                type="button"
+                data-event-idx={i}
+                className={`state-event-row is-${eventKind(e.action)}${selected ? " is-selected" : ""}`}
+                onClick={() => setEventIdx(i)}
+              >
+                <span className="state-event-index">{i.toLocaleString()}</span>
+                <span className="state-event-main">
+                  <span className="state-event-title">{formatEventTitle(e)}</span>
+                  <span className="state-event-sub">
+                    {eventTimeLabel(e, data)}
+                    {e.addr ? ` · 0x${e.addr.toString(16)}` : ""}
+                  </span>
+                  {frame && <span className="state-event-frame">{frame}</span>}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="state-canvas-panel" style={{ width: rightW, height: canvasH }}>
+          <div className="state-current-event mono">
+            <span className={`state-current-pill is-${event ? eventKind(event.action) : "meta"}`}>
+              {event ? event.action : "none"}
+            </span>
+            <span>{eventTime}</span>
+            {event && event.addr !== 0 && <span>0x{event.addr.toString(16)}</span>}
+            {event && event.size > 0 && <span>{formatBytes(event.size)}</span>}
+            {eventFrame && <span className="faint">{eventFrame}</span>}
+          </div>
+          <canvas
+            ref={canvasRef}
+            className="tl-canvas"
+            style={{ cursor: dragRef.current ? "grabbing" : "grab" }}
+            onMouseDown={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              dragRef.current = {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top,
+                ox: viewRef.current.x,
+                oy: viewRef.current.y,
+                moved: false,
+              };
+            }}
+            onMouseMove={handleMouseMove}
+            onMouseUp={() => {
+              suppressClickRef.current = !!dragRef.current?.moved;
+              dragRef.current = null;
+            }}
+            onMouseLeave={() => { dragRef.current = null; setHover(null); }}
+            onDoubleClick={() => { viewRef.current = { scale: 1, x: 0, y: 0 }; draw(); }}
+            onWheel={handleWheel}
+            onClick={() => {
+              if (suppressClickRef.current) {
+                suppressClickRef.current = false;
+                return;
+              }
+              if (hover?.kind === "block" && hover.block.alloc_us >= 0) {
+                setSelectedAlloc({ addr: hover.block.addr, alloc_us: hover.block.alloc_us });
+              }
+            }}
           />
-        )}
+          {hover && (
+            <StateHoverCard
+              hover={hover}
+              framePool={framePool}
+              containerW={rightW}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

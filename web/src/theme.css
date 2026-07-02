@@ -209,6 +209,10 @@ button { font-family: inherit; }
   position: relative;
   overflow: hidden;
 }
+.state-history:focus,
+.state-history:focus-visible {
+  outline: none;
+}
 .state-toolbar {
   height: 50px;
   display: grid;
@@ -256,6 +260,121 @@ button { font-family: inherit; }
   width: 100%;
   accent-color: var(--accent);
 }
+.state-split {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+}
+.state-events {
+  flex: 0 0 auto;
+  overflow: auto;
+  border-right: 1px solid var(--divider);
+  background: rgba(17, 17, 19, 0.42);
+}
+.state-event-row {
+  appearance: none;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid rgba(31, 31, 35, 0.52);
+  background: transparent;
+  color: var(--fg-muted);
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+.state-event-row:hover {
+  background: rgba(250, 250, 250, 0.04);
+  color: var(--fg);
+}
+.state-event-row.is-selected {
+  background: rgba(217, 249, 157, 0.10);
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+.state-event-row.is-alloc { border-left-color: rgba(96, 165, 250, 0.55); }
+.state-event-row.is-free { border-left-color: rgba(248, 113, 113, 0.55); }
+.state-event-row.is-segment { border-left-color: rgba(251, 191, 36, 0.60); }
+.state-event-row.is-oom { border-left-color: rgba(248, 113, 113, 0.90); }
+.state-event-row.is-selected.is-alloc { border-left-color: var(--blue); }
+.state-event-row.is-selected.is-free,
+.state-event-row.is-selected.is-oom { border-left-color: var(--red); }
+.state-event-row.is-selected.is-segment { border-left-color: var(--orange); }
+.state-event-index {
+  color: var(--fg-faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.state-event-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.state-event-title {
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.state-event-sub,
+.state-event-frame {
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.state-event-row.is-selected .state-event-sub,
+.state-event-row.is-selected .state-event-frame {
+  color: var(--fg-muted);
+}
+.state-canvas-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+.state-current-event {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  background: rgba(10, 10, 11, 0.64);
+  border: 1px solid rgba(42, 42, 47, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--fg-muted);
+  font-size: 10px;
+  pointer-events: none;
+}
+.state-current-event span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.state-current-pill {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+}
+.state-current-pill.is-alloc { border-color: rgba(96, 165, 250, 0.7); }
+.state-current-pill.is-free,
+.state-current-pill.is-oom { border-color: rgba(248, 113, 113, 0.75); }
+.state-current-pill.is-segment { border-color: rgba(251, 191, 36, 0.75); }
 .topallocs-filter {
   display: flex;
   align-items: center;

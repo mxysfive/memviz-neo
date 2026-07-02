@@ -83,6 +83,13 @@ export default function PhaseTimeline({
   const rulerRef = useRef<Ruler | null>(null);
   const selRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const selStartRef = useRef<{ x: number; y: number } | null>(null);
+  const panDragRef = useRef<{
+    x: number;
+    y: number;
+    xRange: [number, number];
+    yRange: [number, number];
+    moved: boolean;
+  } | null>(null);
   // Single source of "please repaint". Set by every ref mutation above
   // and by effect setups; the rAF loop clears it after each frame.
   // Default true so first paint happens.
@@ -276,6 +283,32 @@ export default function PhaseTimeline({
       return yMin + ((MARGIN.top + plotH - y) / plotH) * (yMax - yMin);
     },
     [plotH],
+  );
+
+  const clampXRange = useCallback(
+    (min: number, max: number): [number, number] => {
+      const absMin = xAxisMode === "event" ? 0 : data.time_min;
+      const absMax = xAxisMode === "event" ? totalXRange : data.time_max;
+      const full = Math.max(1, absMax - absMin);
+      let span = Math.max(xAxisMode === "event" ? 1 : 100, max - min);
+      if (span >= full) return [absMin, absMax];
+      if (min < absMin) { min = absMin; max = min + span; }
+      if (max > absMax) { max = absMax; min = max - span; }
+      return [min, max];
+    },
+    [xAxisMode, data.time_min, data.time_max, totalXRange],
+  );
+
+  const clampYRange = useCallback(
+    (min: number, max: number): [number, number] => {
+      const span = Math.max(1, max - min);
+      const cap = Math.max(data.peak_bytes, yRangeRef.current[1], maxBytesFull) * 1.2;
+      if (span >= cap) return [0, cap];
+      if (min < 0) { min = 0; max = span; }
+      if (max > cap) { max = cap; min = cap - span; }
+      return [min, max];
+    },
+    [data.peak_bytes, maxBytesFull],
   );
 
   // --- WebGL strip upload (zero-copy from pre-packed buffer) ---
@@ -883,6 +916,28 @@ export default function PhaseTimeline({
         return;
       }
 
+      // Plain drag pans the zoomed view, matching the official d3-zoom
+      // interaction. Shift+drag remains the explicit box-zoom gesture.
+      if (panDragRef.current) {
+        const pan = panDragRef.current;
+        const dx = mx - pan.x;
+        const dy = my - pan.y;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) pan.moved = true;
+        const [x0, x1] = pan.xRange;
+        const xSpan = x1 - x0;
+        const xShift = -(dx / plotW) * xSpan;
+        viewRangeRef.current = clampXRange(x0 + xShift, x1 + xShift);
+
+        const [y0, y1] = pan.yRange;
+        const ySpan = y1 - y0;
+        if (Math.abs(dy) > 0) {
+          const yShift = (dy / plotH) * ySpan;
+          manualYRangeRef.current = clampYRange(y0 + yShift, y1 + yShift);
+        }
+        invalidate();
+        return;
+      }
+
       // Non-drag hover — coalesce to rAF so fast mouse motion doesn't
       // trigger N hitTests per frame.
       hoverPendingRef.current = { mx, my };
@@ -890,7 +945,37 @@ export default function PhaseTimeline({
         hoverRafRef.current = requestAnimationFrame(runHoverDetection);
       }
     },
-    [plotW, plotH, runHoverDetection],
+    [plotW, plotH, runHoverDetection, viewRangeRef, clampXRange, clampYRange],
+  );
+
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      if (mx < MARGIN.left || mx > MARGIN.left + plotW || my < MARGIN.top || my > MARGIN.top + plotH) return;
+
+      const zoom = Math.exp(-e.deltaY * 0.0015);
+      const [x0, x1] = viewRangeRef.current;
+      const cursorT = xToTime(mx);
+      const leftFrac = (cursorT - x0) / Math.max(1e-9, x1 - x0);
+      const newSpan = (x1 - x0) / zoom;
+      const newMin = cursorT - newSpan * leftFrac;
+      viewRangeRef.current = clampXRange(newMin, newMin + newSpan);
+
+      // Ctrl/trackpad pinch and Shift+wheel also zoom Y around the cursor.
+      if (e.shiftKey || e.ctrlKey) {
+        const [y0, y1] = manualYRangeRef.current ?? yRangeRef.current;
+        const cursorB = yToBytes(my);
+        const yFrac = (cursorB - y0) / Math.max(1e-9, y1 - y0);
+        const ySpan = (y1 - y0) / zoom;
+        const yMin = cursorB - ySpan * yFrac;
+        manualYRangeRef.current = clampYRange(yMin, yMin + ySpan);
+      }
+      invalidate();
+    },
+    [plotW, plotH, viewRangeRef, xToTime, yToBytes, clampXRange, clampYRange],
   );
 
 
@@ -951,12 +1036,29 @@ export default function PhaseTimeline({
         return;
       }
 
-      // Start selection rectangle
-      const sx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
-      const sy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
-      selStartRef.current = { x: sx, y: sy };
+      if (mx < MARGIN.left || mx > MARGIN.left + plotW || my < MARGIN.top || my > MARGIN.top + plotH) {
+        return;
+      }
+
+      if (e.shiftKey) {
+        // Shift+drag = selection rectangle / zoom-to-box.
+        const sx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
+        const sy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
+        selStartRef.current = { x: sx, y: sy };
+        return;
+      }
+
+      // Plain drag = pan. Seed Y from the current painted range so
+      // panning vertically works even when auto-fit is active.
+      panDragRef.current = {
+        x: mx,
+        y: my,
+        xRange: [...viewRangeRef.current],
+        yRange: manualYRangeRef.current ?? [...yRangeRef.current],
+        moved: false,
+      };
     },
-    [plotW, plotH],
+    [plotW, plotH, viewRangeRef],
   );
 
   const handleMouseUp = useCallback(
@@ -964,6 +1066,26 @@ export default function PhaseTimeline({
       // Finish ruler drag
       if (rulerDragRef.current) {
         rulerDragRef.current = null;
+        return;
+      }
+
+      if (panDragRef.current) {
+        const pan = panDragRef.current;
+        panDragRef.current = null;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        if (!pan.moved) {
+          const anomHover = hoverAnomalyRef.current;
+          if (anomHover) {
+            const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
+            setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
+          } else {
+            const hit = hoverAllocRef.current ?? hitTest(mx, my);
+            setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+          }
+        }
+        invalidate();
         return;
       }
 
@@ -1028,7 +1150,9 @@ export default function PhaseTimeline({
 
   const cursorStyle = rulerDragRef.current
     ? (rulerDragRef.current.type === "vertical" ? "ns-resize" : "ew-resize")
-    : "crosshair";
+    : panDragRef.current
+      ? "grabbing"
+      : "grab";
 
   return (
     <div>
@@ -1045,6 +1169,7 @@ export default function PhaseTimeline({
           onKeyDown={handleKeyDown}
           onKeyUp={handleKeyUp}
           onMouseMove={handleMouseMove}
+          onWheel={handleWheel}
 
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
@@ -1059,6 +1184,7 @@ export default function PhaseTimeline({
             updateHoverCard();
             selStartRef.current = null;
             selRectRef.current = null;
+            panDragRef.current = null;
             if (rulerDragRef.current) rulerDragRef.current = null;
             invalidate();
           }}

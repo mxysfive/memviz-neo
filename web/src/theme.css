@@ -198,6 +198,64 @@ button { font-family: inherit; }
   min-height: 240px;
   padding-top: 8px;
 }
+.state-main {
+  flex: 0 0 auto;
+  position: relative;
+  overflow: hidden;
+  min-height: 240px;
+  padding-top: 8px;
+}
+.state-history {
+  position: relative;
+  overflow: hidden;
+}
+.state-toolbar {
+  height: 50px;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr) minmax(220px, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--divider);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.state-toolbar-left,
+.state-toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.state-toolbar-right {
+  justify-content: flex-end;
+}
+.state-controls {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.state-controls button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-muted);
+  height: 24px;
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+.state-controls button:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.state-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
 .topallocs-filter {
   display: flex;
   align-items: center;

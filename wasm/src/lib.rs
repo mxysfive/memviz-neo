@@ -495,6 +495,22 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
+    // Raw allocator trace events for Allocator State History. Keep this
+    // compact: the UI needs action/addr/size/time and a resolved frame,
+    // not full stacks duplicated per event.
+    j.push_str("\"trace_events\":[");
+    for (i, (action, _device_addr, size, time_us, raw_addr, stack_idx)) in traces.iter().enumerate() {
+        if i > 0 { j.push(','); }
+        let top = resolve_top_frame_from_stack(*stack_idx, &pools);
+        j.push_str(&format!("{{\"action\":{},\"addr\":{},\"size\":{},\"time_us\":{},\"top_frame_idx\":",
+            json_str(action), raw_addr, size, time_us));
+        emit_frame_idx(&mut j, top);
+        j.push_str(",\"stack_idx\":");
+        let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", stack_idx));
+        j.push('}');
+    }
+    j.push_str("],");
+
     // Top-N allocations: layout-worker input. Each entry carries the
     // minimum scalars needed for polygon layout, strip packing, anomaly
     // detection, and detail panel resolution (via stack_idx -> stack_pool).

@@ -38,6 +38,16 @@ export interface SegmentRow {
   allocs: SegmentAlloc[];
 }
 
+/** One allocator trace event retained for state-history replay. */
+export interface TraceEvent {
+  action: string;
+  addr: number;
+  size: number;
+  time_us: number;
+  top_frame_idx: number;
+  stack_idx: number;
+}
+
 /** One flame-graph rectangle. Coordinates are in weight units
  *  (bytes × timeline unit); the renderer converts to pixels using totalWeight. */
 export interface FlameNode {
@@ -79,6 +89,8 @@ export interface RankData {
   /** Per-segment allocator row data for the SegmentTimeline view. Sorted
    *  by totalSize desc so the biggest cached segments render on top. */
   segmentRows: SegmentRow[];
+  /** Raw-ish allocator trace events used to replay Allocator State History. */
+  traceEvents: TraceEvent[];
   /** Flame graph: call-stack → memory pressure aggregate. */
   flame: FlameData;
   // Interned frame records and stacks (stacks point into framePool).

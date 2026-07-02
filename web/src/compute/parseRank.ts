@@ -13,7 +13,7 @@ import type { TimelineAlloc, TimelineTimeAxis } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
-import type { Allocation, RankData, SegmentRow, SegmentAlloc, FlameData, FlameNode } from "./index";
+import type { Allocation, RankData, SegmentRow, SegmentAlloc, TraceEvent, FlameData, FlameNode } from "./index";
 import { blockColor } from "./palette";
 import { eventIdxAt } from "./eventTimes";
 import { isInternalFrame } from "../utils";
@@ -421,6 +421,14 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const stackPool: Uint32Array[] = rawStackPool.map((arr) => Uint32Array.from(arr));
 
   const topAllocsIR: TopAllocIR[] = raw.top_allocations || [];
+  const traceEvents: TraceEvent[] = (raw.trace_events || []).map((e: any) => ({
+    action: String(e.action || ""),
+    addr: Number(e.addr || 0),
+    size: Number(e.size || 0),
+    time_us: Number(e.time_us || 0),
+    top_frame_idx: Number(e.top_frame_idx ?? -1),
+    stack_idx: Number(e.stack_idx ?? -1),
+  }));
   const timeMin: number = raw.timeline.time_min;
   const timeMax: number = raw.timeline.time_max;
   const timeAxis: TimelineTimeAxis = raw.timeline.time_axis || "time_us";
@@ -502,6 +510,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     stripCount: packed.stripCount,
     maxBytesFull: (packed.maxBytesFull || raw.timeline.peak_bytes) * 1.1,
     segmentRows,
+    traceEvents,
     flame,
     framePool,
     stackPool,

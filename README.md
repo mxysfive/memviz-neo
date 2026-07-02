@@ -72,8 +72,9 @@ Reproduce: `node bench/{memviz,pytorch,desktop,render}.mjs` — see
 ## Views
 
 - **Multi-Rank Overview** — one bar per rank, heights scale on peak, click to switch focus.
-- **Memory Timeline** — WebGL2 instanced strips for every alloc. `WASD` pan/zoom X, `Shift+WASD` for Y, drag a box to zoom both, `R`/`T`+drag for rulers. X-axis toggles wall-clock μs ↔ event ordinal so dense phases stop collapsing into a smear.
+- **Memory Timeline** — WebGL2 instanced strips for every alloc. Drag pans, wheel zooms at the cursor, `Shift`+drag zooms to a box, `WASD` pan/zoom X, `Shift+WASD` for Y, `R`/`T`+drag for rulers. X-axis toggles wall-clock μs ↔ event ordinal so dense phases stop collapsing into a smear.
 - **Segment Timeline** — one row per caching-allocator segment, allocs at their in-segment offset. Pan/zoom locks to Memory Timeline; selecting an alloc expands its row 30 → 120 px.
+- **Allocator State** — replays allocator trace events and draws the segment/block layout after each event, including segment alloc/free and pending-free blocks.
 - **Anomalies** — pending-free stalls + leak suspects, each cross-linked back to the timeline.
 - **Memory Flame Graph** — call-stack rolled up by `bytes × lifetime`. Drill-in breadcrumb, hover tooltip.
 

@@ -9,6 +9,7 @@ import TopAllocations from "./views/TopAllocations";
 import RankSidebar from "./views/RankSidebar";
 import AnomalyPanel from "./views/AnomalyPanel";
 import SegmentTimeline from "./views/SegmentTimeline";
+import AllocatorStateHistory from "./views/AllocatorStateHistory";
 import { ShortcutsHint, TimelineDetailPanel } from "./views/TimelineDetail";
 import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
@@ -73,6 +74,8 @@ function Dashboard() {
   const timelineAllocs = useDataStore((s) => s.timelineAllocs);
   const anomalies = useDataStore((s) => s.anomalies);
   const segmentRows = useDataStore((s) => s.segmentRows);
+  const segments = useDataStore((s) => s.segments);
+  const traceEvents = useDataStore((s) => s.traceEvents);
   const currentRank = useDataStore((s) => s.currentRank);
   const error = useDataStore((s) => s.error);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
@@ -126,7 +129,7 @@ function Dashboard() {
     [tlHeight, availableH, startDrag, setPhaseRatio],
   );
 
-  const [mainView, setMainView] = useState<"timeline" | "flame">("timeline");
+  const [mainView, setMainView] = useState<"timeline" | "state" | "flame">("timeline");
   // Flamegraph drill-in root, lifted up so the bottom Top Allocs can
   // filter to "stack contains this frame". -1 = "All" (no filter).
   const [flameRoot, setFlameRoot] = useState<{ idx: number; label: string }>({
@@ -231,6 +234,12 @@ function Dashboard() {
                   Memory Timeline
                 </button>
                 <button
+                  className={mainView === "state" ? "is-active" : ""}
+                  onClick={() => setMainView("state")}
+                >
+                  Allocator State
+                </button>
+                <button
                   className={mainView === "flame" ? "is-active" : ""}
                   onClick={() => setMainView("flame")}
                 >
@@ -247,6 +256,8 @@ function Dashboard() {
                     )}
                     <ShortcutsHint />
                   </>
+                ) : mainView === "state" ? (
+                  <span className="faint"> · {traceEvents.length} events</span>
                 ) : (
                   flame && <span className="faint"> · {flame.totalWeight.toLocaleString()} {pressureUnit}</span>
                 )}
@@ -294,6 +305,24 @@ function Dashboard() {
                       />
                     </div>
                   </>
+                )}
+              </div>
+            ) : mainView === "state" ? (
+              <div
+                className="state-main"
+                style={{ height: availableH }}
+              >
+                {timeline && tlWidth > 0 && traceEvents.length > 0 ? (
+                  <AllocatorStateHistory
+                    data={timeline}
+                    segments={segments}
+                    traceEvents={traceEvents}
+                    width={tlWidth}
+                    height={availableH}
+                    currentRank={currentRank}
+                  />
+                ) : (
+                  <Empty label="No trace events" />
                 )}
               </div>
             ) : (

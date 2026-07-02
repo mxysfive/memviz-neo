@@ -10,7 +10,7 @@ import type {
   TimelineAlloc,
   AllocationDetail,
 } from "../types/timeline";
-import type { RankData, Anomaly, SegmentRow, FlameData } from "../compute";
+import type { RankData, Anomaly, SegmentRow, TraceEvent, FlameData } from "../compute";
 import { getActivePool } from "./fileStore";
 import { formatTopFrame } from "../utils";
 
@@ -42,6 +42,8 @@ interface DataState {
   timelineMaxBytesFull: number;
   /** Per-allocator-segment rows for the SegmentTimeline view. */
   segmentRows: SegmentRow[];
+  /** Allocator trace events for state-history replay. */
+  traceEvents: TraceEvent[];
   /** Call-stack pressure flamegraph for the current rank. */
   flame: FlameData | null;
   /** X-axis unit. "time" uses absolute microseconds, "event" numbers
@@ -90,6 +92,7 @@ function applyRankData(data: RankData | null, rank: number): Partial<DataState> 
     timelineStripCount: data?.stripCount ?? 0,
     timelineMaxBytesFull: data?.maxBytesFull ?? 0,
     segmentRows: data?.segmentRows ?? [],
+    traceEvents: data?.traceEvents ?? [],
     flame: data?.flame ?? null,
     focusedAddr: null,
     focusRange: null,
@@ -121,6 +124,7 @@ export const useDataStore = create<DataState>((set, get) => ({
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
   segmentRows: [],
+  traceEvents: [],
   flame: null,
   // Default matches PyTorch's Active Memory Timeline: X axis counts
   // alloc/free events, so dense training phases aren't compressed by

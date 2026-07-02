@@ -58,6 +58,11 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
   const glRef = useRef<GLState | null>(null);
   const dirtyRef = useRef(true);
   const lastViewRef = useRef<[number, number]>([0, 0]);
+  const panDragRef = useRef<{
+    x: number;
+    range: [number, number];
+    moved: boolean;
+  } | null>(null);
   const selectedAlloc = useDataStore((s) => s.selectedAlloc);
 
   const plotLeft = LEFT_GUTTER;
@@ -108,6 +113,18 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
     return { yTop, yH, canvasH: y + BOTTOM_PAD };
   }, [rows, highlight?.rowIdx, slotHeight]);
   const height = rowLayout.canvasH;
+
+  const clampXRange = (min: number, max: number): [number, number] => {
+    const absMin = mode === "event" ? 0 : data.time_min;
+    const absMax = mode === "event" ? Math.max(1, eventTimes ? eventTimes.length - 1 : 1) : data.time_max;
+    const full = Math.max(1, absMax - absMin);
+    const minSpan = mode === "event" ? 1 : 100;
+    const span = Math.max(minSpan, max - min);
+    if (span >= full) return [absMin, absMax];
+    if (min < absMin) { min = absMin; max = min + span; }
+    if (max > absMax) { max = absMax; min = max - span; }
+    return [min, max];
+  };
 
   // Build the WebGL instance buffer once per data/size change. Each alloc
   // becomes (t_start, t_end, yBot_in_bytes_axis, h_in_bytes_axis, r, g, b).
@@ -396,7 +413,20 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
   const hoverRaf = useRef<number | null>(null);
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    hoverPending.current = { mx: e.clientX - rect.left, my: e.clientY - rect.top };
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (panDragRef.current) {
+      const pan = panDragRef.current;
+      const dx = mx - pan.x;
+      if (Math.abs(dx) > 2) pan.moved = true;
+      const [x0, x1] = pan.range;
+      const span = x1 - x0;
+      const shift = -(dx / plotW) * span;
+      viewRangeRef.current = clampXRange(x0 + shift, x1 + shift);
+      dirtyRef.current = true;
+      return;
+    }
+    hoverPending.current = { mx, my };
     if (hoverRaf.current !== null) return;
     hoverRaf.current = requestAnimationFrame(() => {
       hoverRaf.current = null;
@@ -424,6 +454,43 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
       dirtyRef.current = true;
       setHover(null);
     }
+    panDragRef.current = null;
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return;
+    e.currentTarget.focus();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    if (mx < plotLeft || mx > plotLeft + plotW) return;
+    panDragRef.current = {
+      x: mx,
+      range: [...viewRangeRef.current],
+      moved: false,
+    };
+  };
+
+  const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const pan = panDragRef.current;
+    panDragRef.current = null;
+    if (!pan || pan.moved) return;
+    handleClick(e);
+  };
+
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    if (mx < plotLeft || mx > plotLeft + plotW) return;
+    const [x0, x1] = viewRangeRef.current;
+    const span = x1 - x0;
+    const cursor = x0 + ((mx - plotLeft) / plotW) * span;
+    const zoom = Math.exp(-e.deltaY * 0.0015);
+    const nextSpan = span / zoom;
+    const frac = (cursor - x0) / Math.max(1e-9, span);
+    const nextMin = cursor - nextSpan * frac;
+    viewRangeRef.current = clampXRange(nextMin, nextMin + nextSpan);
+    dirtyRef.current = true;
   };
 
   return (
@@ -435,11 +502,19 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
       <canvas
         ref={canvasRef}
         className="tl-canvas"
-        style={{ position: "relative", background: "transparent", cursor: "pointer" }}
+        style={{ position: "relative", background: "transparent", cursor: panDragRef.current ? "grabbing" : "grab" }}
         tabIndex={0}
-        onClick={handleClick}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
+        onWheel={handleWheel}
+        onDoubleClick={() => {
+          viewRangeRef.current = mode === "event"
+            ? [0, Math.max(1, eventTimes ? eventTimes.length - 1 : 1)]
+            : [data.time_min, data.time_max];
+          dirtyRef.current = true;
+        }}
       />
       {hover && (
         <SegmentHoverCard

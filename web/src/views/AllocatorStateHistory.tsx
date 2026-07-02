@@ -58,7 +58,10 @@ type Hover =
   | null;
 
 const MARGIN = { top: 18, right: 18, bottom: 24, left: 12 };
-const TOOLBAR_H = 50;
+const TOOLBAR_H = 64;
+const EVENT_ROW_H = 58;
+const EVENT_OVERSCAN = 8;
+const CHECKPOINT_STRIDE = 256;
 
 function eventTimeLabel(e: TraceEvent, data: TimelineData): string {
   return data.time_axis === "event_ordinal"
@@ -183,17 +186,21 @@ function buildFinalState(segments: SegmentInfo[]) {
   return { segmentMap, blockMap };
 }
 
-function replayState(
-  finalSegments: Map<number, StateSegment>,
-  finalBlocks: Map<number, StateBlock>,
-  events: TraceEvent[],
-  eventIdx: number,
+interface ReplayCheckpoint {
+  segmentMap: Map<number, StateSegment>;
+  blockMap: Map<number, StateBlock>;
+}
+
+interface ReplayCache {
+  events: TraceEvent[];
+  checkpoints: Map<number, ReplayCheckpoint>;
+  lastIdx: number;
+}
+
+function snapshotFromMaps(
+  segmentMap: Map<number, StateSegment>,
+  blockMap: Map<number, StateBlock>,
 ): StateSnapshot {
-  const segmentMap = cloneSegments(finalSegments);
-  const blockMap = cloneBlocks(finalBlocks);
-  for (let i = events.length - 1; i > eventIdx; i--) {
-    unapplyEvent(segmentMap, blockMap, events[i]);
-  }
   const segments = [...segmentMap.values()].filter((s) => s.size > 0);
   const blocks = [...blockMap.values()].filter((b) => b.size > 0);
   return {
@@ -202,6 +209,59 @@ function replayState(
     reserved: segments.reduce((sum, s) => sum + s.size, 0),
     allocated: blocks.reduce((sum, b) => sum + b.size, 0),
   };
+}
+
+function createReplayCache(
+  finalSegments: Map<number, StateSegment>,
+  finalBlocks: Map<number, StateBlock>,
+  events: TraceEvent[],
+): ReplayCache {
+  const lastIdx = events.length - 1;
+  const checkpoints = new Map<number, ReplayCheckpoint>();
+  if (lastIdx >= 0) {
+    checkpoints.set(lastIdx, {
+      segmentMap: finalSegments,
+      blockMap: finalBlocks,
+    });
+  }
+  return { events, checkpoints, lastIdx };
+}
+
+function replayStateCached(cache: ReplayCache, eventIdx: number): StateSnapshot {
+  if (eventIdx < 0 || cache.lastIdx < 0) return snapshotFromMaps(new Map(), new Map());
+
+  let checkpointIdx = cache.lastIdx;
+  for (const idx of cache.checkpoints.keys()) {
+    if (idx >= eventIdx && idx < checkpointIdx) checkpointIdx = idx;
+  }
+  const checkpoint = cache.checkpoints.get(checkpointIdx) || cache.checkpoints.get(cache.lastIdx);
+  if (!checkpoint) return snapshotFromMaps(new Map(), new Map());
+
+  const segmentMap = cloneSegments(checkpoint.segmentMap);
+  const blockMap = cloneBlocks(checkpoint.blockMap);
+  for (let i = checkpointIdx; i > eventIdx; i--) {
+    unapplyEvent(segmentMap, blockMap, cache.events[i]);
+  }
+  if (checkpointIdx - eventIdx >= CHECKPOINT_STRIDE) {
+    cache.checkpoints.set(eventIdx, {
+      segmentMap: cloneSegments(segmentMap),
+      blockMap: cloneBlocks(blockMap),
+    });
+  }
+  return snapshotFromMaps(segmentMap, blockMap);
+}
+
+function parseAddressQuery(raw: string): string {
+  const q = raw.trim().toLowerCase();
+  if (!q) return "";
+  return q.startsWith("0x") ? q.slice(2) : q;
+}
+
+function eventMatchesAddress(e: TraceEvent, needle: string): boolean {
+  if (!needle || e.addr === 0) return false;
+  const hex = e.addr.toString(16).toLowerCase();
+  const dec = String(e.addr);
+  return hex.includes(needle) || dec.includes(needle);
 }
 
 function layoutSegments(segments: StateSegment[], plotW: number): {
@@ -240,6 +300,8 @@ export default function AllocatorStateHistory({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const eventsRef = useRef<HTMLDivElement>(null);
   const [eventIdx, setEventIdx] = useState(() => Math.max(0, traceEvents.length - 1));
+  const [eventScrollTop, setEventScrollTop] = useState(0);
+  const [addressQuery, setAddressQuery] = useState("");
   const [hover, setHover] = useState<Hover>(null);
   const framePool = useDataStore((s) => s.framePool);
   const setSelectedAlloc = useDataStore((s) => s.setSelectedAlloc);
@@ -249,17 +311,24 @@ export default function AllocatorStateHistory({
 
   useEffect(() => {
     setEventIdx(Math.max(0, traceEvents.length - 1));
+    setEventScrollTop(0);
+    setAddressQuery("");
     viewRef.current = { scale: 1, x: 0, y: 0 };
     setHover(null);
   }, [traceEvents, currentRank]);
 
   const finalState = useMemo(() => buildFinalState(segments), [segments]);
+  const replayCache = useMemo(
+    () => createReplayCache(finalState.segmentMap, finalState.blockMap, traceEvents),
+    [finalState, traceEvents],
+  );
   const safeIdx = traceEvents.length === 0
     ? -1
     : Math.max(0, Math.min(eventIdx, traceEvents.length - 1));
+  const lastEventIdx = Math.max(0, traceEvents.length - 1);
   const state = useMemo(
-    () => replayState(finalState.segmentMap, finalState.blockMap, traceEvents, safeIdx),
-    [finalState, traceEvents, safeIdx],
+    () => replayStateCached(replayCache, safeIdx),
+    [replayCache, safeIdx],
   );
 
   const listW = Math.max(260, Math.min(420, Math.round(width * 0.34)));
@@ -273,9 +342,111 @@ export default function AllocatorStateHistory({
   );
 
   useEffect(() => {
-    const row = eventsRef.current?.querySelector<HTMLElement>(`[data-event-idx="${safeIdx}"]`);
-    row?.scrollIntoView({ block: "nearest" });
-  }, [safeIdx]);
+    if (replayCache.lastIdx < 0) return;
+    let cancelled = false;
+    const segmentMap = cloneSegments(finalState.segmentMap);
+    const blockMap = cloneBlocks(finalState.blockMap);
+    let from = replayCache.lastIdx;
+    let cursor = Math.max(0, from - CHECKPOINT_STRIDE);
+
+    const pump = () => {
+      if (cancelled) return;
+      const deadline = performance.now() + 6;
+      while (!cancelled && cursor >= 0 && performance.now() < deadline) {
+        for (; from > cursor; from--) {
+          unapplyEvent(segmentMap, blockMap, traceEvents[from]);
+        }
+        replayCache.checkpoints.set(cursor, {
+          segmentMap: cloneSegments(segmentMap),
+          blockMap: cloneBlocks(blockMap),
+        });
+        cursor -= CHECKPOINT_STRIDE;
+      }
+      if (!cancelled && cursor >= 0) {
+        window.setTimeout(pump, 0);
+      }
+    };
+
+    const timer = window.setTimeout(pump, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [replayCache, finalState, traceEvents]);
+
+  useEffect(() => {
+    const el = eventsRef.current;
+    if (!el || safeIdx < 0) return;
+    const top = safeIdx * EVENT_ROW_H;
+    const bottom = top + EVENT_ROW_H;
+    if (top < el.scrollTop) {
+      el.scrollTop = top;
+      setEventScrollTop(top);
+    } else if (bottom > el.scrollTop + el.clientHeight) {
+      const nextTop = Math.max(0, bottom - el.clientHeight);
+      el.scrollTop = nextTop;
+      setEventScrollTop(nextTop);
+    }
+  }, [safeIdx, canvasH]);
+
+  const visibleStart = Math.max(0, Math.floor(eventScrollTop / EVENT_ROW_H) - EVENT_OVERSCAN);
+  const visibleEnd = Math.min(
+    traceEvents.length,
+    Math.ceil((eventScrollTop + canvasH) / EVENT_ROW_H) + EVENT_OVERSCAN,
+  );
+  const visibleEvents = traceEvents.slice(visibleStart, visibleEnd);
+
+  const searchNeedle = useMemo(() => parseAddressQuery(addressQuery), [addressQuery]);
+  const searchMatches = useMemo(() => {
+    if (!searchNeedle) return [];
+    const matches: number[] = [];
+    for (let i = 0; i < traceEvents.length; i++) {
+      if (eventMatchesAddress(traceEvents[i], searchNeedle)) matches.push(i);
+    }
+    return matches;
+  }, [traceEvents, searchNeedle]);
+  const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
+  const searchMatchIndex = useMemo(() => {
+    const index = new Map<number, number>();
+    searchMatches.forEach((eventIndex, ordinal) => index.set(eventIndex, ordinal));
+    return index;
+  }, [searchMatches]);
+  const selectedMatchOrdinal = safeIdx >= 0 ? searchMatchIndex.get(safeIdx) ?? -1 : -1;
+
+  const handleAddressQueryChange = useCallback((value: string) => {
+    setAddressQuery(value);
+    const needle = parseAddressQuery(value);
+    if (!needle) return;
+    for (let i = 0; i < traceEvents.length; i++) {
+      if (eventMatchesAddress(traceEvents[i], needle)) {
+        setEventIdx(i);
+        return;
+      }
+    }
+  }, [traceEvents]);
+
+  const selectSearchMatch = useCallback((direction: 1 | -1) => {
+    if (searchMatches.length === 0) return;
+    const currentOrdinal = safeIdx >= 0 ? searchMatchIndex.get(safeIdx) ?? -1 : -1;
+    if (currentOrdinal < 0) {
+      if (direction > 0) {
+        const firstForward = searchMatches.find((idx) => idx > safeIdx);
+        setEventIdx(firstForward ?? searchMatches[0]);
+      } else {
+        let firstBackward: number | undefined;
+        for (let i = searchMatches.length - 1; i >= 0; i--) {
+          if (searchMatches[i] < safeIdx) {
+            firstBackward = searchMatches[i];
+            break;
+          }
+        }
+        setEventIdx(firstBackward ?? searchMatches[searchMatches.length - 1]);
+      }
+      return;
+    }
+    const nextOrdinal = (currentOrdinal + direction + searchMatches.length) % searchMatches.length;
+    setEventIdx(searchMatches[nextOrdinal]);
+  }, [safeIdx, searchMatches, searchMatchIndex]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -484,24 +655,59 @@ export default function AllocatorStateHistory({
           <span>{safeIdx >= 0 ? `${safeIdx + 1}/${traceEvents.length}` : "0/0"}</span>
         </div>
         <div className="state-controls">
-          <button onClick={() => setEventIdx((i) => Math.max(0, i - 1))}>Prev</button>
-          <input
-            type="range"
-            min={0}
-            max={Math.max(0, traceEvents.length - 1)}
-            value={Math.max(0, safeIdx)}
-            onChange={(e) => setEventIdx(Number(e.currentTarget.value))}
-          />
-          <button onClick={() => setEventIdx((i) => Math.min(traceEvents.length - 1, i + 1))}>Next</button>
-          <button
-            onClick={() => {
-              setEventIdx(Math.max(0, traceEvents.length - 1));
-              viewRef.current = { scale: 1, x: 0, y: 0 };
-              setHover(null);
-            }}
-          >
-            Latest
-          </button>
+          <div className="state-search">
+            <input
+              type="search"
+              value={addressQuery}
+              placeholder="addr 0x..."
+              spellCheck={false}
+              onChange={(e) => handleAddressQueryChange(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  selectSearchMatch(e.shiftKey ? -1 : 1);
+                  e.preventDefault();
+                }
+              }}
+            />
+            <button
+              type="button"
+              disabled={searchMatches.length === 0}
+              onClick={() => selectSearchMatch(-1)}
+            >
+              Prev hit
+            </button>
+            <button
+              type="button"
+              disabled={searchMatches.length === 0}
+              onClick={() => selectSearchMatch(1)}
+            >
+              Next hit
+            </button>
+            <span className="state-search-count">
+              {searchNeedle ? `${selectedMatchOrdinal >= 0 ? selectedMatchOrdinal + 1 : 0}/${searchMatches.length}` : ""}
+            </span>
+          </div>
+          <div className="state-range-controls">
+            <button type="button" onClick={() => setEventIdx((i) => Math.max(0, i - 1))}>Prev</button>
+            <input
+              type="range"
+              min={0}
+              max={Math.max(0, traceEvents.length - 1)}
+              value={Math.max(0, safeIdx)}
+              onChange={(e) => setEventIdx(Number(e.currentTarget.value))}
+            />
+            <button type="button" onClick={() => setEventIdx((i) => Math.min(lastEventIdx, i + 1))}>Next</button>
+            <button
+              type="button"
+              onClick={() => {
+                setEventIdx(lastEventIdx);
+                viewRef.current = { scale: 1, x: 0, y: 0 };
+                setHover(null);
+              }}
+            >
+              Latest
+            </button>
+          </div>
         </div>
         <div className="state-toolbar-right">
           <span>{formatBytes(state.allocated)} allocated</span>
@@ -513,30 +719,39 @@ export default function AllocatorStateHistory({
           ref={eventsRef}
           className="state-events"
           style={{ width: listW }}
+          onScroll={(e) => setEventScrollTop(e.currentTarget.scrollTop)}
         >
-          {traceEvents.map((e, i) => {
-            const selected = i === safeIdx;
-            const frame = formatTopFrame(e.top_frame_idx, framePool);
-            return (
-              <button
-                key={`${i}-${e.action}-${e.addr}-${e.time_us}`}
-                type="button"
-                data-event-idx={i}
-                className={`state-event-row is-${eventKind(e.action)}${selected ? " is-selected" : ""}`}
-                onClick={() => setEventIdx(i)}
-              >
-                <span className="state-event-index">{i.toLocaleString()}</span>
-                <span className="state-event-main">
-                  <span className="state-event-title">{formatEventTitle(e)}</span>
-                  <span className="state-event-sub">
-                    {eventTimeLabel(e, data)}
-                    {e.addr ? ` · 0x${e.addr.toString(16)}` : ""}
+          <div
+            className="state-events-spacer"
+            style={{ height: traceEvents.length * EVENT_ROW_H }}
+          >
+            {visibleEvents.map((e, localIdx) => {
+              const i = visibleStart + localIdx;
+              const selected = i === safeIdx;
+              const matched = searchMatchSet.has(i);
+              const frame = formatTopFrame(e.top_frame_idx, framePool);
+              return (
+                <button
+                  key={`${i}-${e.action}-${e.addr}-${e.time_us}`}
+                  type="button"
+                  data-event-idx={i}
+                  className={`state-event-row is-${eventKind(e.action)}${selected ? " is-selected" : ""}${matched ? " is-match" : ""}`}
+                  style={{ height: EVENT_ROW_H, transform: `translateY(${i * EVENT_ROW_H}px)` }}
+                  onClick={() => setEventIdx(i)}
+                >
+                  <span className="state-event-index">{i.toLocaleString()}</span>
+                  <span className="state-event-main">
+                    <span className="state-event-title">{formatEventTitle(e)}</span>
+                    <span className="state-event-sub">
+                      {eventTimeLabel(e, data)}
+                      {e.addr ? ` · 0x${e.addr.toString(16)}` : ""}
+                    </span>
+                    {frame && <span className="state-event-frame">{frame}</span>}
                   </span>
-                  {frame && <span className="state-event-frame">{frame}</span>}
-                </span>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="state-canvas-panel" style={{ width: rightW, height: canvasH }}>
           <div className="state-current-event mono">

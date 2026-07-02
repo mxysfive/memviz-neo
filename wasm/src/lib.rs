@@ -73,6 +73,17 @@ struct Block {
     top_frame_idx: u32,
 }
 
+struct TraceRaw {
+    action: String,
+    device_addr: i64,
+    size: i64,
+    time_us: i64,
+    raw_addr: i64,
+    stack_idx: u32,
+    event_ord: i64,
+    has_time: bool,
+}
+
 // ---- Pickle walker ----
 //
 // Walks the Rc<Value> tree produced by pickle::parse. Values are shared
@@ -124,7 +135,7 @@ struct RootMeta {
 fn parse_snapshot(
     data: &[u8],
     pools: &mut Pools,
-) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>, RootMeta) {
+) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>, RootMeta, bool) {
     let root = pickle::parse(data).expect("pickle parse failed");
     let root_dict = pickle::as_dict(&root).expect("root not a dict");
 
@@ -177,13 +188,14 @@ fn parse_snapshot(
     // device_traces — flatten, keep only events with "addr". Device index
     // disambiguates addresses across GPUs (shifted into the high bits of
     // the key used for alloc/free pairing).
-    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::new();
+    let mut raw_traces: Vec<TraceRaw> = Vec::new();
     if let Some(dt_v) = pickle::dict_get(root_dict, "device_traces") {
         let outer_cell = match dt_v.as_ref() {
             RcValue::List(cell) => Some(cell),
             _ => None,
         };
         if let Some(outer_cell) = outer_cell {
+            let mut event_ord: i64 = 0;
             for (dev_idx_usize, dev) in outer_cell.borrow().iter().enumerate() {
                 let dev_idx = dev_idx_usize as i64;
                 let evs_cell = match pickle::as_list(dev) { Some(c) => c, None => continue };
@@ -193,21 +205,40 @@ fn parse_snapshot(
                     let addr = rd_int(ed, "addr");
                     let device_addr = (dev_idx << 48) | (addr & 0x0000_FFFF_FFFF_FFFF);
                     let stack_idx = intern_frames(ed, pools);
-                    traces.push((
-                        rd_str(ed, "action"),
+                    let time_v = pickle::dict_get(ed, "time_us");
+                    raw_traces.push(TraceRaw {
+                        action: rd_str(ed, "action"),
                         device_addr,
-                        rd_int(ed, "size"),
-                        rd_int(ed, "time_us"),
-                        addr,
+                        size: rd_int(ed, "size"),
+                        time_us: time_v.as_ref().map(pickle::to_int).unwrap_or(event_ord),
+                        raw_addr: addr,
                         stack_idx,
-                    ));
+                        event_ord,
+                        has_time: time_v.is_some(),
+                    });
+                    event_ord += 1;
                 }
             }
         }
     }
+    // CUDA traces in some snapshots carry wall-clock-ish microseconds.
+    // torch_npu traces currently omit time_us entirely; preserve allocator
+    // ordering by using event ordinal for every event in that snapshot.
+    let uses_event_ord = raw_traces.iter().any(|t| !t.has_time);
+    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::with_capacity(raw_traces.len());
+    for t in raw_traces {
+        traces.push((
+            t.action,
+            t.device_addr,
+            t.size,
+            if uses_event_ord { t.event_ord } else { t.time_us },
+            t.raw_addr,
+            t.stack_idx,
+        ));
+    }
     traces.sort_by_key(|t| t.3);
 
-    (segments, traces, meta)
+    (segments, traces, meta, uses_event_ord)
 }
 
 // ---- Top frame selection ----
@@ -383,7 +414,7 @@ pub fn parse_pickle_only(data: &[u8]) -> u32 {
 #[wasm_bindgen]
 pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let mut pools = Pools::new();
-    let (segments, traces, meta) = parse_snapshot(data, &mut pools);
+    let (segments, traces, meta, uses_event_ord) = parse_snapshot(data, &mut pools);
 
     let seg_active: i64 = segments.iter()
         .flat_map(|s| s.blocks.iter())
@@ -423,7 +454,8 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
         meta.max_split_size,
         meta.gc_threshold,
     ));
-    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", allocs.len()));
+    let time_axis = if uses_event_ord { "event_ordinal" } else { "time_us" };
+    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"time_axis\":{},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", json_str(time_axis), allocs.len()));
 
     // Interned frame pool: [[name, filename, line], ...]
     j.push_str("\"frame_pool\":[");

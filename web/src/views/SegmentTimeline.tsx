@@ -450,6 +450,7 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
           containerW={width}
           framePool={framePool}
           tMax={data.time_max}
+          timeAxis={data.time_axis}
         />
       )}
     </div>
@@ -464,6 +465,7 @@ function SegmentHoverCard({
   containerW,
   framePool,
   tMax,
+  timeAxis,
 }: {
   alloc: SegmentAlloc;
   row: SegmentRow;
@@ -472,10 +474,14 @@ function SegmentHoverCard({
   containerW: number;
   framePool: import("../types/snapshot").FrameRecord[];
   tMax: number;
+  timeAxis: import("../types/timeline").TimelineTimeAxis;
 }) {
   const alive = alloc.free_us < 0;
   const freeUs = alive ? tMax : alloc.free_us;
-  const durMs = ((freeUs - alloc.alloc_us) / 1000).toFixed(2);
+  const span = freeUs - alloc.alloc_us;
+  const duration = timeAxis === "event_ordinal"
+    ? `${Math.round(span).toLocaleString()} events`
+    : `${(span / 1000).toFixed(2)}ms`;
   const top = formatTopFrame(alloc.top_frame_idx, framePool) || `0x${alloc.addr.toString(16)}`;
   // Place below-right of cursor by default; flip left if it would clip.
   const PAD = 12;
@@ -506,7 +512,7 @@ function SegmentHoverCard({
       </div>
       <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 2 }}>{top}</div>
       <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>
-        {alive ? `${durMs}ms · alive` : `${durMs}ms`}
+        {alive ? `${duration} · alive` : duration}
       </div>
     </div>
   );

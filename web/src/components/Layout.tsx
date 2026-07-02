@@ -11,6 +11,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   const hasData = useFileStore((s) => s.ranks.length > 0);
   const xAxisMode = useDataStore((s) => s.xAxisMode);
   const setXAxisMode = useDataStore((s) => s.setXAxisMode);
+  const timeline = useDataStore((s) => s.timeline);
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
   const liveSummary = useRankSummaries((s) => s.summaries[currentRank]);
@@ -21,6 +22,7 @@ export default function Layout({ children }: { children: ReactNode }) {
 
   const { peak, reserved, baseline } = summaryMetrics(liveSummary);
   const util = reserved > 0 ? ((peak / reserved) * 100).toFixed(0) : "—";
+  const eventOrdinalOnly = timeline?.time_axis === "event_ordinal";
 
   return (
     <div
@@ -46,7 +48,8 @@ export default function Layout({ children }: { children: ReactNode }) {
               <button
                 className={xAxisMode === "time" ? "is-active" : ""}
                 onClick={() => setXAxisMode("time")}
-                title="X axis = absolute microseconds"
+                disabled={eventOrdinalOnly}
+                title={eventOrdinalOnly ? "This snapshot has event order but no timestamp field" : "X axis = absolute microseconds"}
               >
                 time
               </button>

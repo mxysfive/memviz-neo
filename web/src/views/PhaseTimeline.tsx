@@ -171,6 +171,7 @@ export default function PhaseTimeline({
   const stripBufferTime = useDataStore((s) => s.timelineStripBuffer);
   const stripBufferEvent = useDataStore((s) => s.timelineStripBufferEvent);
   const xAxisMode = useDataStore((s) => s.xAxisMode);
+  const displayXAxisMode = xAxisMode === "event" || data.time_axis === "event_ordinal" ? "event" : "time";
   // Active buffer for the current X-axis mode. Swapping this drives the
   // WebGL upload + bucket index rebuild. In event mode t values in the
   // buffer are event indices with origin 0; in time mode they're μs
@@ -629,7 +630,7 @@ export default function PhaseTimeline({
         const tx = timeToX(t);
         ctx.strokeStyle = COLOR_AXIS_DIM; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(tx, MARGIN.top + plotH); ctx.lineTo(tx, MARGIN.top + plotH + 4); ctx.stroke();
-        const label = xAxisMode === "event"
+        const label = displayXAxisMode === "event"
           ? `#${Math.round(t).toLocaleString()}`
           : `${((t - data.time_min) / 1e6).toFixed(2)}s`;
         ctx.fillText(label, tx, height - 14);
@@ -638,7 +639,7 @@ export default function PhaseTimeline({
       ctx.textAlign = "right";
       ctx.fillStyle = COLOR_AXIS_DIM;
       ctx.font = FONT_DISPLAY_SM;
-      ctx.fillText(xAxisMode === "event" ? "EVENT →" : "TIME →", MARGIN.left + plotW, height - 2);
+      ctx.fillText(displayXAxisMode === "event" ? "EVENT →" : "TIME →", MARGIN.left + plotW, height - 2);
 
       // Peak line
       const peakY = bytesToY(data.peak_bytes);
@@ -698,7 +699,7 @@ export default function PhaseTimeline({
       drawRuler(ctx,
         ruler,
         { left: MARGIN.left, top: MARGIN.top, w: plotW, h: plotH },
-        xAxisMode, data.time_min, yToBytes, xToTime);
+        displayXAxisMode, data.time_min, yToBytes, xToTime);
     }
 
     // Selection rectangle
@@ -809,11 +810,14 @@ export default function PhaseTimeline({
       eb.textContent = "Block";
       pr.textContent = formatBytes(hb.size);
       se.textContent = formatTopFrame(hb.top_frame_idx, framePool) || `0x${hb.addr.toString(16)}`;
-      const dur = ((hb.free_us - hb.alloc_us) / 1e6).toFixed(4);
-      te.textContent = hb.alive ? `${dur}s · alive` : `${dur}s`;
+      const span = hb.free_us - hb.alloc_us;
+      const dur = data.time_axis === "event_ordinal"
+        ? `${Math.round(span).toLocaleString()} events`
+        : `${(span / 1e6).toFixed(4)}s`;
+      te.textContent = hb.alive ? `${dur} · alive` : dur;
     }
     card.style.display = "block";
-  }, [framePool]);
+  }, [framePool, data.time_axis]);
 
   const runHoverDetection = useCallback(() => {
     hoverRafRef.current = null;

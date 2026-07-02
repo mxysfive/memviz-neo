@@ -1,5 +1,6 @@
 import type { Allocation } from "./index";
 import { formatBytes } from "../utils";
+import type { TimelineTimeAxis } from "../types/timeline";
 
 export type AnomalyType = "pending_free" | "leak";
 
@@ -19,12 +20,16 @@ export interface Anomaly {
 const PENDING_FREE_THRESHOLD_US = 1000; // 1ms
 const LEAK_MIN_SIZE = 1_048_576; // 1MB
 
-export function detectAnomalies(allocations: Allocation[], timeMax: number): Anomaly[] {
+export function detectAnomalies(
+  allocations: Allocation[],
+  timeMax: number,
+  timeAxis: TimelineTimeAxis = "time_us",
+): Anomaly[] {
   const anomalies: Anomaly[] = [];
 
   for (const a of allocations) {
     // Long pending_free: user freed but CUDA events delayed completion
-    if (a.free_requested_us > 0 && a.free_us > 0) {
+    if (timeAxis === "time_us" && a.free_requested_us > 0 && a.free_us > 0) {
       const pendingDuration = a.free_us - a.free_requested_us;
       if (pendingDuration > PENDING_FREE_THRESHOLD_US) {
         const totalLifetime = a.free_us - a.alloc_us;
@@ -45,11 +50,14 @@ export function detectAnomalies(allocations: Allocation[], timeMax: number): Ano
     // Leak suspects: alive at end, large
     if (a.free_us === -1 && a.size >= LEAK_MIN_SIZE) {
       const aliveFor = timeMax - a.alloc_us;
+      const detail = timeAxis === "event_ordinal"
+        ? `${formatBytes(a.size)} allocated at event #${Math.round(a.alloc_us).toLocaleString()}, never freed (alive for ${Math.round(aliveFor).toLocaleString()} events). Check if this is intentional.`
+        : `${formatBytes(a.size)} allocated at ${((a.alloc_us) / 1e6).toFixed(3)}s, never freed (alive ${(aliveFor / 1e6).toFixed(2)}s). Check if this is intentional.`;
       anomalies.push({
         type: "leak",
         severity: Math.min(1, a.size / (1024 * 1024 * 1024)), // severity by size (up to 1GB)
         label: `Alive ${formatBytes(a.size)}`,
-        detail: `${formatBytes(a.size)} allocated at ${((a.alloc_us) / 1e6).toFixed(3)}s, never freed (alive ${(aliveFor / 1e6).toFixed(2)}s). Check if this is intentional.`,
+        detail,
         addr: a.addr,
         alloc_us: a.alloc_us,
         free_us: -1,

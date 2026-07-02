@@ -96,6 +96,9 @@ function applyRankData(data: RankData | null, rank: number): Partial<DataState> 
     selectedAlloc: null,
     switching: false,
     _currentData: data,
+    ...(data?.timeline.time_axis === "event_ordinal"
+      ? { xAxisMode: "event" as const }
+      : {}),
   };
 }
 

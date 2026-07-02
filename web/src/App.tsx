@@ -137,10 +137,11 @@ function Dashboard() {
     setFlameRoot({ idx, label });
   }, []);
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
+  const pressureUnit = timeline?.time_axis === "event_ordinal" ? "bytes·evt" : "bytes·us";
 
   // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
   // read/write every frame so they follow each other without re-renders.
-  // Units track xAxisMode: μs in time mode, event index in event mode.
+  // Units track xAxisMode: source units in time mode, event index in event mode.
   const viewRangeRef = useRef<[number, number]>([0, 1]);
   if (import.meta.env.DEV) {
     const w = window as unknown as { __viewRange: unknown; __store: unknown };
@@ -247,7 +248,7 @@ function Dashboard() {
                     <ShortcutsHint />
                   </>
                 ) : (
-                  flame && <span className="faint"> · {flame.totalWeight.toLocaleString()} bytes</span>
+                  flame && <span className="faint"> · {flame.totalWeight.toLocaleString()} {pressureUnit}</span>
                 )}
               </span>
             </div>
@@ -330,4 +331,3 @@ function Dashboard() {
     </Layout>
   );
 }
-

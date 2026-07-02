@@ -38,8 +38,8 @@ export interface SegmentRow {
   allocs: SegmentAlloc[];
 }
 
-/** One flame-graph rectangle. Coordinates are in weight units (bytes·μs
- *  of memory pressure); the renderer converts to pixels using totalWeight. */
+/** One flame-graph rectangle. Coordinates are in weight units
+ *  (bytes × timeline unit); the renderer converts to pixels using totalWeight. */
 export interface FlameNode {
   /** Frame pool index; -1 for the synthetic root ("all"). */
   frameIdx: number;
@@ -66,11 +66,11 @@ export interface RankData {
   stripBuffer: Float32Array;
   /** Same shape as stripBuffer, but with t_start/t_end replaced by
    *  event indices (position in `eventTimes`). Lets the timeline view
-   *  switch between "actual μs" and "event ordinal" X axis by swapping
+   *  switch between source X units and event ordinal by swapping
    *  GPU buffers, no re-layout needed. */
   stripBufferEvent: Float32Array;
   stripCount: number;
-  /** Sorted unique alloc/free event times for this rank, relative to
+  /** Sorted unique alloc/free event X values for this rank, relative to
    *  timeline.time_min. Used for (time_us ↔ event_idx) mapping when the
    *  user toggles the X axis mode. */
   eventTimes: Float64Array;

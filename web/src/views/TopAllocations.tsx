@@ -25,6 +25,7 @@ export default function TopAllocations({
 }: Props) {
   const framePool = useDataStore((s) => s.framePool);
   const stackPool = useDataStore((s) => s.stackPool);
+  const timeAxis = useDataStore((s) => s.timeline?.time_axis || "time_us");
   const [sortKey, setSortKey] = useState<SortKey>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(0);
@@ -73,7 +74,11 @@ export default function TopAllocations({
     ) : null;
 
   const fmtLifetime = (row: TopAllocation) =>
-    row.free_us === -1 ? "alive" : `${(row.lifetime_us / 1e6).toFixed(3)}s`;
+    row.free_us === -1
+      ? "alive"
+      : timeAxis === "event_ordinal"
+        ? `${Math.round(row.lifetime_us).toLocaleString()} evt`
+        : `${(row.lifetime_us / 1e6).toFixed(3)}s`;
 
   return (
     <div>
@@ -101,7 +106,7 @@ export default function TopAllocations({
                 style={{ width: 110, cursor: "pointer", userSelect: "none" }}
                 onClick={() => toggleSort("lifetime_us")}
               >
-                Lifetime {sortArrow("lifetime_us")}
+                {timeAxis === "event_ordinal" ? "Span" : "Lifetime"} {sortArrow("lifetime_us")}
               </th>
               <th>Source</th>
               <th style={{ width: 160 }}>Address</th>

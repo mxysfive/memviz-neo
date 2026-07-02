@@ -1,8 +1,12 @@
+export type TimelineTimeAxis = "time_us" | "event_ordinal";
+
 export interface TimelineData {
-  usage_series: [number, number][]; // [time_us, total_bytes]
+  usage_series: [number, number][]; // [x, total_bytes]
   annotations: TimelineAnnotation[];
   time_min: number;
   time_max: number;
+  /** "time_us" = real microseconds; "event_ordinal" = allocator event order. */
+  time_axis: TimelineTimeAxis;
   peak_bytes: number;
   allocation_count: number;
   /**

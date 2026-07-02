@@ -9,7 +9,7 @@
 // top to bottom.
 
 import type { RankSummary, SegmentInfo, TopAllocation, FrameRecord } from "../types/snapshot";
-import type { TimelineAlloc } from "../types/timeline";
+import type { TimelineAlloc, TimelineTimeAxis } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
@@ -36,7 +36,7 @@ interface TopAllocIR {
 /** Output of `packStrips` — downstream stages (segment rows, RankData
  *  assembly) consume these aggregates together so we pass one struct. */
 interface PackedTimeline {
-  stripBuffer: Float32Array;        // GPU buffer, time axis (μs since t_min)
+  stripBuffer: Float32Array;        // GPU buffer, source X axis since t_min
   stripBufferEvent: Float32Array;   // GPU buffer, event-ordinal axis
   eventTimes: Float64Array;         // sorted unique event times (relative to t_min)
   timelineAllocs: TimelineAlloc[];  // one per alloc; stripOffset/Count point into stripBuffer
@@ -330,7 +330,7 @@ function buildSegmentRows(
 
 /**
  * Build a prefix trie of call stacks weighted by size × lifetime
- * (bytes·μs of memory pressure), then DFS-flatten into a flat node list
+ * (bytes·time-unit of memory pressure), then DFS-flatten into a flat node list
  * the flame-graph view can draw directly. Allocator-internal + C++
  * frames get filtered out so the tree shows human-readable PyTorch
  * code paths.
@@ -423,6 +423,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const topAllocsIR: TopAllocIR[] = raw.top_allocations || [];
   const timeMin: number = raw.timeline.time_min;
   const timeMax: number = raw.timeline.time_max;
+  const timeAxis: TimelineTimeAxis = raw.timeline.time_axis || "time_us";
   // Pre-window allocations not freed in window — aggregated, not
   // per-alloc. Drawn as an opaque band at the bottom so the y axis
   // reflects real memory usage instead of "delta from window start".
@@ -454,7 +455,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     top_frame_idx: a.top_frame_idx,
     stack_idx: a.stack_idx,
   }));
-  const anomalies: Anomaly[] = detectAnomalies(allocations, timeMax);
+  const anomalies: Anomaly[] = detectAnomalies(allocations, timeMax, timeAxis);
 
   // Detail lookup: keyed by "addr-alloc_us" so address reuse (PyTorch
   // re-allocates freed GPU memory) doesn't collide.
@@ -488,6 +489,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
       annotations: [],
       time_min: timeMin,
       time_max: timeMax,
+      time_axis: timeAxis,
       peak_bytes: raw.timeline.peak_bytes,
       allocation_count: raw.timeline.allocation_count,
       baseline,

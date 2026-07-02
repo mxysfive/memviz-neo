@@ -48,7 +48,7 @@ export interface TopAllocation {
   alloc_us: number;
   /** -1 if alive at snapshot end. */
   free_us: number;
-  /** Pre-computed (free_us - alloc_us), or (timeMax - alloc_us) if alive. */
+  /** Pre-computed source-axis span; microseconds or event ordinals. */
   lifetime_us: number;
   /** Index into RankData.framePool. */
   top_frame_idx: number;

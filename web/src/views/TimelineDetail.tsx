@@ -40,6 +40,7 @@ export function TimelineDetailPanel() {
   const currentRank = useDataStore((s) => s.currentRank);
   const segments = useDataStore((s) => s.segments);
   const getDetail = useDataStore((s) => s.getDetail);
+  const timeAxis = useDataStore((s) => s.timeline?.time_axis || "time_us");
   const [detail, setDetail] = useState<AllocationDetail | null>(null);
 
   useEffect(() => {
@@ -96,11 +97,13 @@ export function TimelineDetailPanel() {
           <span className="stat-value" style={{ fontSize: 18 }}>{formatBytes(detail.size)}</span>
         </div>
         <div className="stat">
-          <span className="stat-label">Duration</span>
+          <span className="stat-label">{timeAxis === "event_ordinal" ? "Span" : "Duration"}</span>
           <span className="stat-value" style={{ fontSize: 18 }}>
             {detail.free_us === -1
               ? "alive"
-              : `${((detail.free_us - detail.alloc_us) / 1e6).toFixed(4)}s`}
+              : timeAxis === "event_ordinal"
+                ? `${Math.round(detail.free_us - detail.alloc_us).toLocaleString()} events`
+                : `${((detail.free_us - detail.alloc_us) / 1e6).toFixed(4)}s`}
           </span>
         </div>
         <div className="stat">

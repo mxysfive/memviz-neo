@@ -63,7 +63,7 @@ struct Allocation {
 
 struct Segment {
     address: i64, total_size: i64, allocated_size: i64, active_size: i64,
-    segment_type: String, blocks: Vec<Block>,
+    segment_type: String, stream: i64, blocks: Vec<Block>,
 }
 
 struct Block {
@@ -80,6 +80,7 @@ struct TraceRaw {
     time_us: i64,
     raw_addr: i64,
     stack_idx: u32,
+    stream: i64,
     event_ord: i64,
     has_time: bool,
 }
@@ -135,7 +136,7 @@ struct RootMeta {
 fn parse_snapshot(
     data: &[u8],
     pools: &mut Pools,
-) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>, RootMeta, bool) {
+) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32, i64)>, RootMeta, bool) {
     let root = pickle::parse(data).expect("pickle parse failed");
     let root_dict = pickle::as_dict(&root).expect("root not a dict");
 
@@ -160,26 +161,34 @@ fn parse_snapshot(
     if let Some(segs_v) = pickle::dict_get(root_dict, "segments") {
         pickle::with_list_items(&segs_v, |sv| {
             let sd = match pickle::as_dict(sv) { Some(d) => d, None => return };
+            let segment_addr = rd_int(sd, "address");
+            let mut next_block_addr = segment_addr;
             let mut blocks: Vec<Block> = Vec::new();
             if let Some(bs_v) = pickle::dict_get(sd, "blocks") {
                 pickle::with_list_items(&bs_v, |bv| {
                     let bd = match pickle::as_dict(bv) { Some(d) => d, None => return };
                     let stack_idx = intern_frames(bd, pools);
                     let top_frame_idx = resolve_top_frame_from_stack(stack_idx, pools);
+                    let size = rd_int(bd, "size");
+                    let address = pickle::dict_get(bd, "address")
+                        .map(|v| pickle::to_int(&v))
+                        .unwrap_or(next_block_addr);
                     blocks.push(Block {
-                        address: rd_int(bd, "address"),
-                        size: rd_int(bd, "size"),
+                        address,
+                        size,
                         state: rd_str(bd, "state"),
                         top_frame_idx,
                     });
+                    next_block_addr += size;
                 });
             }
             segments.push(Segment {
-                address: rd_int(sd, "address"),
+                address: segment_addr,
                 total_size: rd_int(sd, "total_size"),
                 allocated_size: rd_int(sd, "allocated_size"),
                 active_size: rd_int(sd, "active_size"),
                 segment_type: rd_str(sd, "segment_type"),
+                stream: rd_int(sd, "stream"),
                 blocks,
             });
         });
@@ -213,6 +222,7 @@ fn parse_snapshot(
                         time_us: time_v.as_ref().map(pickle::to_int).unwrap_or(event_ord),
                         raw_addr: addr,
                         stack_idx,
+                        stream: rd_int(ed, "stream"),
                         event_ord,
                         has_time: time_v.is_some(),
                     });
@@ -225,7 +235,7 @@ fn parse_snapshot(
     // torch_npu traces currently omit time_us entirely; preserve allocator
     // ordering by using event ordinal for every event in that snapshot.
     let uses_event_ord = raw_traces.iter().any(|t| !t.has_time);
-    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::with_capacity(raw_traces.len());
+    let mut traces: Vec<(String, i64, i64, i64, i64, u32, i64)> = Vec::with_capacity(raw_traces.len());
     for t in raw_traces {
         traces.push((
             t.action,
@@ -234,6 +244,7 @@ fn parse_snapshot(
             if uses_event_ord { t.event_ord } else { t.time_us },
             t.raw_addr,
             t.stack_idx,
+            t.stream,
         ));
     }
     traces.sort_by_key(|t| t.3);
@@ -291,7 +302,7 @@ fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
 // the renderer draws as a band so the y axis matches reality.
 
 fn build_allocations(
-    traces: &[(String, i64, i64, i64, i64, u32)],
+    traces: &[(String, i64, i64, i64, i64, u32, i64)],
     segments_active_allocated: i64,
     pools: &Pools,
 ) -> (Vec<Allocation>, i64, i64, i64, i64) {
@@ -313,7 +324,7 @@ fn build_allocations(
     let t_min = traces.first().unwrap().3;
     let t_max = traces.last().unwrap().3;
 
-    for (action, device_addr, size, time_us, raw_addr, stack_idx) in traces {
+    for (action, device_addr, size, time_us, raw_addr, stack_idx, _stream) in traces {
         match action.as_str() {
             "alloc" => {
                 pending.insert(*device_addr, P {
@@ -482,8 +493,8 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     j.push_str("\"segments\":[");
     for (si, s) in segments.iter().enumerate() {
         if si > 0 { j.push(','); }
-        j.push_str(&format!("{{\"address\":{},\"total_size\":{},\"allocated_size\":{},\"segment_type\":{},\"blocks\":[",
-            s.address, s.total_size, s.allocated_size, json_str(&s.segment_type)));
+        j.push_str(&format!("{{\"address\":{},\"total_size\":{},\"allocated_size\":{},\"segment_type\":{},\"stream\":{},\"blocks\":[",
+            s.address, s.total_size, s.allocated_size, json_str(&s.segment_type), s.stream));
         for (bi, b) in s.blocks.iter().enumerate() {
             if bi > 0 { j.push(','); }
             j.push_str(&format!("{{\"address\":{},\"size\":{},\"state\":{},\"offset_in_segment\":{},\"top_frame_idx\":",
@@ -499,11 +510,11 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     // compact: the UI needs action/addr/size/time and a resolved frame,
     // not full stacks duplicated per event.
     j.push_str("\"trace_events\":[");
-    for (i, (action, _device_addr, size, time_us, raw_addr, stack_idx)) in traces.iter().enumerate() {
+    for (i, (action, _device_addr, size, time_us, raw_addr, stack_idx, stream)) in traces.iter().enumerate() {
         if i > 0 { j.push(','); }
         let top = resolve_top_frame_from_stack(*stack_idx, &pools);
-        j.push_str(&format!("{{\"action\":{},\"addr\":{},\"size\":{},\"time_us\":{},\"top_frame_idx\":",
-            json_str(action), raw_addr, size, time_us));
+        j.push_str(&format!("{{\"action\":{},\"addr\":{},\"size\":{},\"stream\":{},\"time_us\":{},\"top_frame_idx\":",
+            json_str(action), raw_addr, size, stream, time_us));
         emit_frame_idx(&mut j, top);
         j.push_str(",\"stack_idx\":");
         let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", stack_idx));

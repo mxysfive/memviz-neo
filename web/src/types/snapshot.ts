@@ -39,6 +39,7 @@ export interface SegmentInfo {
   total_size: number;
   allocated_size: number;
   segment_type: string;
+  stream?: number;
   blocks: BlockInfo[];
 }
 

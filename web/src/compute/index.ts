@@ -43,6 +43,7 @@ export interface TraceEvent {
   action: string;
   addr: number;
   size: number;
+  stream: number;
   time_us: number;
   top_frame_idx: number;
   stack_idx: number;

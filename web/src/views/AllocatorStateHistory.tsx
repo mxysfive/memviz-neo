@@ -29,6 +29,7 @@ interface StateSegment {
   addr: number;
   size: number;
   segmentType: string;
+  stream: number;
 }
 
 interface StateBlock {
@@ -62,6 +63,7 @@ const TOOLBAR_H = 64;
 const EVENT_ROW_H = 58;
 const EVENT_OVERSCAN = 8;
 const CHECKPOINT_STRIDE = 256;
+const SEGMENT_GAP_PX = 24;
 
 function eventTimeLabel(e: TraceEvent, data: TimelineData): string {
   return data.time_axis === "event_ordinal"
@@ -105,30 +107,108 @@ function makeEventBlock(e: TraceEvent, freeRequested: boolean): StateBlock {
   };
 }
 
-function addSegment(map: Map<number, StateSegment>, e: TraceEvent) {
-  if (e.size <= 0) return;
-  map.set(e.addr, {
+function makeEventSegment(e: TraceEvent): StateSegment {
+  return {
     addr: e.addr,
     size: e.size,
     segmentType: e.action === "segment_map" ? "mapped" : "trace",
-  });
+    stream: e.stream ?? 0,
+  };
 }
 
-function deleteSegmentAndBlocks(
+function segmentEnd(seg: StateSegment): number {
+  return seg.addr + seg.size;
+}
+
+function canMergeSegments(a: StateSegment, b: StateSegment): boolean {
+  return a.stream === b.stream;
+}
+
+function removeBlocksInRange(blockMap: Map<number, StateBlock>, start: number, end: number) {
+  for (const b of Array.from(blockMap.values())) {
+    if (b.addr >= start && b.addr < end) blockMap.delete(b.addr);
+  }
+}
+
+function insertSegment(
+  segmentMap: Map<number, StateSegment>,
+  seg: StateSegment,
+  merge: boolean,
+) {
+  if (seg.size <= 0) return;
+  let next = { ...seg };
+  if (merge) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const existing of Array.from(segmentMap.values())) {
+        if (!canMergeSegments(existing, next)) continue;
+        if (segmentEnd(existing) === next.addr) {
+          segmentMap.delete(existing.addr);
+          next = {
+            ...next,
+            addr: existing.addr,
+            size: existing.size + next.size,
+            segmentType: existing.segmentType,
+          };
+          changed = true;
+          break;
+        }
+        if (segmentEnd(next) === existing.addr) {
+          segmentMap.delete(existing.addr);
+          next = {
+            ...next,
+            size: next.size + existing.size,
+            segmentType: next.segmentType === "mapped" ? existing.segmentType : next.segmentType,
+          };
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  segmentMap.set(next.addr, next);
+}
+
+function removeSegmentRange(
   segmentMap: Map<number, StateSegment>,
   blockMap: Map<number, StateBlock>,
-  addr: number,
+  seg: StateSegment,
+  split: boolean,
 ) {
-  const seg = segmentMap.get(addr);
-  if (!seg) {
-    segmentMap.delete(addr);
+  if (seg.size <= 0) return;
+  const start = seg.addr;
+  const end = segmentEnd(seg);
+  removeBlocksInRange(blockMap, start, end);
+
+  if (!split) {
+    segmentMap.delete(start);
     return;
   }
-  const end = seg.addr + seg.size;
-  for (const b of Array.from(blockMap.values())) {
-    if (b.addr >= seg.addr && b.addr < end) blockMap.delete(b.addr);
+
+  const existing = Array.from(segmentMap.values()).find((s) => (
+    s.addr <= start && end <= segmentEnd(s)
+  ));
+  if (!existing) {
+    segmentMap.delete(start);
+    return;
   }
-  segmentMap.delete(addr);
+
+  const existingEnd = segmentEnd(existing);
+  segmentMap.delete(existing.addr);
+  if (existing.addr < start) {
+    segmentMap.set(existing.addr, {
+      ...existing,
+      size: start - existing.addr,
+    });
+  }
+  if (end < existingEnd) {
+    segmentMap.set(end, {
+      ...existing,
+      addr: end,
+      size: existingEnd - end,
+    });
+  }
 }
 
 function unapplyEvent(
@@ -152,12 +232,49 @@ function unapplyEvent(
       blockMap.set(e.addr, makeEventBlock(e, false));
       break;
     case "segment_alloc":
+      removeSegmentRange(segmentMap, blockMap, makeEventSegment(e), false);
+      break;
     case "segment_map":
-      deleteSegmentAndBlocks(segmentMap, blockMap, e.addr);
+      removeSegmentRange(segmentMap, blockMap, makeEventSegment(e), true);
       break;
     case "segment_free":
+      insertSegment(segmentMap, makeEventSegment(e), false);
+      break;
     case "segment_unmap":
-      addSegment(segmentMap, e);
+      insertSegment(segmentMap, makeEventSegment(e), true);
+      break;
+  }
+}
+
+function applyEvent(
+  segmentMap: Map<number, StateSegment>,
+  blockMap: Map<number, StateBlock>,
+  e: TraceEvent,
+) {
+  switch (e.action) {
+    case "alloc":
+      blockMap.set(e.addr, makeEventBlock(e, false));
+      break;
+    case "free_requested": {
+      const b = blockMap.get(e.addr);
+      if (b) b.freeRequested = true;
+      break;
+    }
+    case "free_completed":
+    case "free":
+      blockMap.delete(e.addr);
+      break;
+    case "segment_alloc":
+      insertSegment(segmentMap, makeEventSegment(e), false);
+      break;
+    case "segment_map":
+      insertSegment(segmentMap, makeEventSegment(e), true);
+      break;
+    case "segment_free":
+      removeSegmentRange(segmentMap, blockMap, makeEventSegment(e), false);
+      break;
+    case "segment_unmap":
+      removeSegmentRange(segmentMap, blockMap, makeEventSegment(e), true);
       break;
   }
 }
@@ -170,6 +287,7 @@ function buildFinalState(segments: SegmentInfo[]) {
       addr: seg.address,
       size: seg.total_size,
       segmentType: seg.segment_type,
+      stream: seg.stream ?? 0,
     });
     for (const b of seg.blocks) {
       if (b.state !== "active_allocated" && b.state !== "active_pending_free") continue;
@@ -218,32 +336,45 @@ function createReplayCache(
 ): ReplayCache {
   const lastIdx = events.length - 1;
   const checkpoints = new Map<number, ReplayCheckpoint>();
+
+  const initialSegments = cloneSegments(finalSegments);
+  const initialBlocks = cloneBlocks(finalBlocks);
+  for (let i = lastIdx; i >= 0; i--) {
+    unapplyEvent(initialSegments, initialBlocks, events[i]);
+  }
+
+  checkpoints.set(-1, {
+    segmentMap: initialSegments,
+    blockMap: initialBlocks,
+  });
   if (lastIdx >= 0) {
     checkpoints.set(lastIdx, {
-      segmentMap: finalSegments,
-      blockMap: finalBlocks,
+      segmentMap: cloneSegments(finalSegments),
+      blockMap: cloneBlocks(finalBlocks),
     });
   }
+
   return { events, checkpoints, lastIdx };
 }
 
 function replayStateCached(cache: ReplayCache, eventIdx: number): StateSnapshot {
-  if (eventIdx < 0 || cache.lastIdx < 0) return snapshotFromMaps(new Map(), new Map());
+  if (cache.lastIdx < 0) return snapshotFromMaps(new Map(), new Map());
+  const targetIdx = Math.max(-1, Math.min(eventIdx, cache.lastIdx));
 
-  let checkpointIdx = cache.lastIdx;
+  let checkpointIdx = -1;
   for (const idx of cache.checkpoints.keys()) {
-    if (idx >= eventIdx && idx < checkpointIdx) checkpointIdx = idx;
+    if (idx <= targetIdx && idx > checkpointIdx) checkpointIdx = idx;
   }
-  const checkpoint = cache.checkpoints.get(checkpointIdx) || cache.checkpoints.get(cache.lastIdx);
+  const checkpoint = cache.checkpoints.get(checkpointIdx) || cache.checkpoints.get(-1);
   if (!checkpoint) return snapshotFromMaps(new Map(), new Map());
 
   const segmentMap = cloneSegments(checkpoint.segmentMap);
   const blockMap = cloneBlocks(checkpoint.blockMap);
-  for (let i = checkpointIdx; i > eventIdx; i--) {
-    unapplyEvent(segmentMap, blockMap, cache.events[i]);
+  for (let i = checkpointIdx + 1; i <= targetIdx; i++) {
+    applyEvent(segmentMap, blockMap, cache.events[i]);
   }
-  if (checkpointIdx - eventIdx >= CHECKPOINT_STRIDE) {
-    cache.checkpoints.set(eventIdx, {
+  if (targetIdx - checkpointIdx >= CHECKPOINT_STRIDE) {
+    cache.checkpoints.set(targetIdx, {
       segmentMap: cloneSegments(segmentMap),
       blockMap: cloneBlocks(blockMap),
     });
@@ -274,7 +405,7 @@ function layoutSegments(segments: StateSegment[], plotW: number): {
     return a.addr - b.addr;
   });
   const maxRowSize = Math.max(1, sorted[sorted.length - 1]?.size ?? 1);
-  const pad = Math.max(1, maxRowSize * (8 / Math.max(1, plotW)));
+  const pad = Math.max(1, maxRowSize * (SEGMENT_GAP_PX / Math.max(1, plotW)));
   let row = 0;
   let rowSize = 0;
   const layout: SegmentLayout[] = [];
@@ -343,26 +474,28 @@ export default function AllocatorStateHistory({
 
   useEffect(() => {
     if (replayCache.lastIdx < 0) return;
+    const initial = replayCache.checkpoints.get(-1);
+    if (!initial) return;
     let cancelled = false;
-    const segmentMap = cloneSegments(finalState.segmentMap);
-    const blockMap = cloneBlocks(finalState.blockMap);
-    let from = replayCache.lastIdx;
-    let cursor = Math.max(0, from - CHECKPOINT_STRIDE);
+    const segmentMap = cloneSegments(initial.segmentMap);
+    const blockMap = cloneBlocks(initial.blockMap);
+    let from = -1;
+    let cursor = Math.min(replayCache.lastIdx, CHECKPOINT_STRIDE - 1);
 
     const pump = () => {
       if (cancelled) return;
       const deadline = performance.now() + 6;
-      while (!cancelled && cursor >= 0 && performance.now() < deadline) {
-        for (; from > cursor; from--) {
-          unapplyEvent(segmentMap, blockMap, traceEvents[from]);
+      while (!cancelled && cursor <= replayCache.lastIdx && performance.now() < deadline) {
+        for (; from < cursor; from++) {
+          applyEvent(segmentMap, blockMap, traceEvents[from + 1]);
         }
         replayCache.checkpoints.set(cursor, {
           segmentMap: cloneSegments(segmentMap),
           blockMap: cloneBlocks(blockMap),
         });
-        cursor -= CHECKPOINT_STRIDE;
+        cursor += CHECKPOINT_STRIDE;
       }
-      if (!cancelled && cursor >= 0) {
+      if (!cancelled && cursor <= replayCache.lastIdx) {
         window.setTimeout(pump, 0);
       }
     };
@@ -372,7 +505,7 @@ export default function AllocatorStateHistory({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [replayCache, finalState, traceEvents]);
+  }, [replayCache, traceEvents]);
 
   useEffect(() => {
     const el = eventsRef.current;
@@ -471,7 +604,7 @@ export default function AllocatorStateHistory({
     const yScale = baseY * scale;
     const toX = (worldX: number) => MARGIN.left + x + worldX * xScale;
     const toY = (worldY: number) => MARGIN.top + y + worldY * yScale;
-    const rowRectH = Math.max(2, yScale * 0.8);
+    const rowRectH = Math.max(2, yScale * 0.66);
 
     ctx.save();
     ctx.beginPath();
@@ -710,6 +843,7 @@ export default function AllocatorStateHistory({
           </div>
         </div>
         <div className="state-toolbar-right">
+          <span>{state.segments.length} segments</span>
           <span>{formatBytes(state.allocated)} allocated</span>
           <span className="faint">/ {formatBytes(state.reserved)} reserved</span>
         </div>

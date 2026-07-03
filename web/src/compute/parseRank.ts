@@ -425,6 +425,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     action: String(e.action || ""),
     addr: Number(e.addr || 0),
     size: Number(e.size || 0),
+    stream: Number(e.stream || 0),
     time_us: Number(e.time_us || 0),
     top_frame_idx: Number(e.top_frame_idx ?? -1),
     stack_idx: Number(e.stack_idx ?? -1),
@@ -443,6 +444,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     total_size: s.total_size,
     allocated_size: s.allocated_size,
     segment_type: s.segment_type,
+    stream: Number(s.stream || 0),
     blocks: (s.blocks || []).map((b: any) => ({
       address: b.address,
       size: b.size,

@@ -545,8 +545,8 @@ export default function PhaseTimeline({
       // adjacent strips into runs and stroke one polygon per run so the
       // outline traces only the outer contour.
       if (selectedAlloc && buf) {
-        ctx.strokeStyle = COLOR_ACCENT;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(0,0,0,0.92)";
+        ctx.lineWidth = 3;
         const off0 = selectedAlloc.stripOffset;
         const count = selectedAlloc.stripCount;
         const sz = selectedAlloc.size;

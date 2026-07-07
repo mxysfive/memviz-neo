@@ -323,8 +323,8 @@ export default function SegmentTimeline({ data, rows, width, height: slotHeight,
         const cx1 = Math.max(plotLeft, Math.min(plotLeft + plotW, usToPx(alloc.alloc_us)));
         const cx2 = Math.max(plotLeft, Math.min(plotLeft + plotW, usToPx(freeUs)));
         if (cx2 > cx1) {
-          ctx.strokeStyle = COLOR_ACCENT;
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "rgba(0,0,0,0.92)";
+          ctx.lineWidth = 2.5;
           ctx.strokeRect(cx1, rectYTop, cx2 - cx1, rectH);
         }
       }

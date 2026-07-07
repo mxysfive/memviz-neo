@@ -13,6 +13,7 @@ const SHORTCUTS: [string, string][] = [
   ["⇧WASD", "pan/zoom Y"],
   ["R + drag", "mem ruler"],
   ["T + drag", "time ruler"],
+  ["Del", "delete ruler"],
   ["wheel", "zoom at cursor"],
   ["drag", "pan"],
   ["⇧drag", "zoom to box"],
@@ -137,8 +138,14 @@ export function TimelineDetailPanel() {
           .filter((f) => !isInternalFrame(f))
           .map((f, i) => {
             const isPython = f.filename.includes(".py");
+            const isOperator = f.name.includes("at::");
             return (
-              <div key={i} className="tl-stack-frame" data-py={isPython ? "1" : "0"}>
+              <div
+                key={i}
+                className="tl-stack-frame"
+                data-py={isPython ? "1" : "0"}
+                data-op={isOperator ? "1" : "0"}
+              >
                 <span className="tl-stack-name">
                   {f.name.length > 100 ? f.name.slice(0, 97) + "…" : f.name}
                 </span>

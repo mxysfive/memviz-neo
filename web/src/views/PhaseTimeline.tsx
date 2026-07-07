@@ -47,6 +47,17 @@ import {
 } from "./theme";
 
 const MARGIN = { top: 24, right: 24, bottom: 44, left: 88 };
+const DOUBLE_CLICK_RESET_MS = 220;
+const DOUBLE_CLICK_RESET_PX = 4;
+
+type StoredRuler =
+  | { id: number; type: "vertical"; xFrac: number; bStart: number; bEnd: number }
+  | { id: number; type: "horizontal"; yFrac: number; tStart: number; tEnd: number };
+
+interface RulerHit {
+  id: number;
+  close: boolean;
+}
 
 
 export default function PhaseTimeline({
@@ -80,7 +91,10 @@ export default function PhaseTimeline({
   // hitTest can project bytes ↔ pixels without recomputing.
   const manualYRangeRef = useRef<[number, number] | null>(null);
   const yRangeRef = useRef<[number, number]>([0, 1]);
-  const rulerRef = useRef<Ruler | null>(null);
+  const rulersRef = useRef<StoredRuler[]>([]);
+  const nextRulerIdRef = useRef(1);
+  const hoverRulerIdRef = useRef<number | null>(null);
+  const lastPlotClickRef = useRef<{ t: number; x: number; y: number } | null>(null);
   const selRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const selStartRef = useRef<{ x: number; y: number } | null>(null);
   const panDragRef = useRef<{
@@ -168,7 +182,7 @@ export default function PhaseTimeline({
     if (a) setSelectedAlloc({ addr: a.addr, alloc_us: a.alloc_us });
   }, [focusedAddr, allocs, setSelectedAlloc]);
 
-  const rulerDragRef = useRef<{ type: RulerType; startPx: { x: number; y: number } } | null>(null);
+  const rulerDragRef = useRef<{ type: RulerType; startPx: { x: number; y: number }; endPx: { x: number; y: number } } | null>(null);
   const keysDownRef = useRef<Set<string>>(new Set());
 
   const plotW = width - MARGIN.left - MARGIN.right;
@@ -228,7 +242,7 @@ export default function PhaseTimeline({
   useEffect(() => {
     // Reset view + transient selection on rank or X-axis mode change —
     // view-range units differ between modes. viewRangeRef / manualYRangeRef
-    // / rulerRef / invalidate are all imperative plumbing; deliberately
+    // / rulersRef / invalidate are all imperative plumbing; deliberately
     // omitted from deps so this only fires when the x-axis basis changes.
     if (xAxisMode === "event") {
       viewRangeRef.current = [0, totalXRange];
@@ -237,7 +251,9 @@ export default function PhaseTimeline({
     }
     manualYRangeRef.current = null;
     setSelectedAlloc(null);
-    rulerRef.current = null;
+    rulersRef.current = [];
+    hoverRulerIdRef.current = null;
+    lastPlotClickRef.current = null;
     invalidate();
   }, [data.time_min, data.time_max, xAxisMode, totalXRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -311,6 +327,124 @@ export default function PhaseTimeline({
     [data.peak_bytes, maxBytesFull],
   );
 
+  const resetView = useCallback(() => {
+    if (xAxisMode === "event") viewRangeRef.current = [0, totalXRange];
+    else viewRangeRef.current = [data.time_min, data.time_max];
+    manualYRangeRef.current = null;
+    lastPlotClickRef.current = null;
+    invalidate();
+  }, [xAxisMode, viewRangeRef, totalXRange, data.time_min, data.time_max]);
+
+  const maybeResetFromShortDoubleClick = useCallback((mx: number, my: number): boolean => {
+    const now = performance.now();
+    const prev = lastPlotClickRef.current;
+    lastPlotClickRef.current = { t: now, x: mx, y: my };
+    if (!prev) return false;
+    const dt = now - prev.t;
+    const dx = mx - prev.x;
+    const dy = my - prev.y;
+    if (dt <= DOUBLE_CLICK_RESET_MS && Math.hypot(dx, dy) <= DOUBLE_CLICK_RESET_PX) {
+      resetView();
+      return true;
+    }
+    return false;
+  }, [resetView]);
+
+  const toStoredRuler = useCallback((ruler: Ruler): StoredRuler => {
+    const id = nextRulerIdRef.current++;
+    if (ruler.type === "vertical") {
+      return {
+        id,
+        type: "vertical",
+        xFrac: (ruler.startPx.x - MARGIN.left) / plotW,
+        bStart: yToBytes(ruler.startPx.y),
+        bEnd: yToBytes(ruler.endPx.y),
+      };
+    }
+    return {
+      id,
+      type: "horizontal",
+      yFrac: (ruler.startPx.y - MARGIN.top) / plotH,
+      tStart: xToTime(ruler.startPx.x),
+      tEnd: xToTime(ruler.endPx.x),
+    };
+  }, [plotW, plotH, yToBytes, xToTime]);
+
+  const materializeRuler = useCallback((ruler: StoredRuler): Ruler | null => {
+    if (ruler.type === "vertical") {
+      const y1 = bytesToY(ruler.bStart);
+      const y2 = bytesToY(ruler.bEnd);
+      if ((y1 < MARGIN.top && y2 < MARGIN.top) || (y1 > MARGIN.top + plotH && y2 > MARGIN.top + plotH)) return null;
+      const x = MARGIN.left + Math.max(0, Math.min(1, ruler.xFrac)) * plotW;
+      return {
+        type: "vertical",
+        startPx: { x, y: y1 },
+        endPx: { x, y: y2 },
+      };
+    }
+    const x1 = timeToX(ruler.tStart);
+    const x2 = timeToX(ruler.tEnd);
+    if ((x1 < MARGIN.left && x2 < MARGIN.left) || (x1 > MARGIN.left + plotW && x2 > MARGIN.left + plotW)) return null;
+    const y = MARGIN.top + Math.max(0, Math.min(1, ruler.yFrac)) * plotH;
+    return {
+      type: "horizontal",
+      startPx: { x: x1, y },
+      endPx: { x: x2, y },
+    };
+  }, [bytesToY, timeToX, plotW, plotH]);
+
+  const closeRectForRuler = useCallback((ruler: Ruler) => {
+    const size = 14;
+    if (ruler.type === "vertical") {
+      const y = (ruler.startPx.y + ruler.endPx.y) / 2;
+      return {
+        x: Math.max(MARGIN.left + 4, Math.min(MARGIN.left + plotW - size - 4, ruler.startPx.x - size - 8)),
+        y: Math.max(MARGIN.top + 4, Math.min(MARGIN.top + plotH - size - 4, y - size / 2)),
+        size,
+      };
+    }
+    const x = (ruler.startPx.x + ruler.endPx.x) / 2;
+    return {
+      x: Math.max(MARGIN.left + 4, Math.min(MARGIN.left + plotW - size - 4, x - size / 2)),
+      y: Math.max(MARGIN.top + 4, Math.min(MARGIN.top + plotH - size - 4, ruler.startPx.y - size - 8)),
+      size,
+    };
+  }, [plotW, plotH]);
+
+  const hitTestRuler = useCallback((mx: number, my: number): RulerHit | null => {
+    const rulers = rulersRef.current;
+    for (let i = rulers.length - 1; i >= 0; i--) {
+      const stored = rulers[i];
+      const ruler = materializeRuler(stored);
+      if (!ruler) continue;
+      const close = closeRectForRuler(ruler);
+      if (
+        mx >= close.x &&
+        mx <= close.x + close.size &&
+        my >= close.y &&
+        my <= close.y + close.size
+      ) {
+        return { id: stored.id, close: true };
+      }
+      if (ruler.type === "vertical") {
+        const yTop = Math.min(ruler.startPx.y, ruler.endPx.y) - 8;
+        const yBot = Math.max(ruler.startPx.y, ruler.endPx.y) + 8;
+        if (Math.abs(mx - ruler.startPx.x) <= 8 && my >= yTop && my <= yBot) return { id: stored.id, close: false };
+      } else {
+        const xL = Math.min(ruler.startPx.x, ruler.endPx.x) - 8;
+        const xR = Math.max(ruler.startPx.x, ruler.endPx.x) + 8;
+        if (Math.abs(my - ruler.startPx.y) <= 8 && mx >= xL && mx <= xR) return { id: stored.id, close: false };
+      }
+    }
+    return null;
+  }, [materializeRuler, closeRectForRuler]);
+
+  const deleteRuler = useCallback((id: number) => {
+    rulersRef.current = rulersRef.current.filter((r) => r.id !== id);
+    if (hoverRulerIdRef.current === id) hoverRulerIdRef.current = null;
+    invalidate();
+  }, []);
+
   // --- WebGL strip upload (zero-copy from pre-packed buffer) ---
   useEffect(() => {
     const glCanvas = glCanvasRef.current;
@@ -375,7 +509,6 @@ export default function PhaseTimeline({
       yRangeRef.current = [yMin, yMax];
       const maxBytes = yMax; // back-compat alias for existing uses below
       const [tMin, tMax] = viewRangeRef.current;
-      const ruler = rulerRef.current;
       const selRect = selRectRef.current;
 
       // WebGL: draw strips (one draw call, GPU-accelerated)
@@ -727,10 +860,35 @@ export default function PhaseTimeline({
       }
     }
 
-    // Ruler
-    if (ruler) {
+    // Rulers
+    for (const stored of rulersRef.current) {
+      const ruler = materializeRuler(stored);
+      if (!ruler) continue;
       drawRuler(ctx,
         ruler,
+        { left: MARGIN.left, top: MARGIN.top, w: plotW, h: plotH },
+        displayXAxisMode, data.time_min, yToBytes, xToTime);
+      if (hoverRulerIdRef.current === stored.id) {
+        const close = closeRectForRuler(ruler);
+        ctx.save();
+        ctx.fillStyle = "rgba(10,10,11,0.92)";
+        ctx.strokeStyle = "rgba(217,249,157,0.75)";
+        ctx.lineWidth = 1;
+        ctx.fillRect(close.x, close.y, close.size, close.size);
+        ctx.strokeRect(close.x, close.y, close.size, close.size);
+        ctx.fillStyle = COLOR_ACCENT;
+        ctx.font = "12px var(--font-mono)";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("x", close.x + close.size / 2, close.y + close.size / 2 + 0.5);
+        ctx.restore();
+      }
+    }
+
+    const activeRuler = rulerDragRef.current;
+    if (activeRuler) {
+      drawRuler(ctx,
+        { type: activeRuler.type, startPx: activeRuler.startPx, endPx: activeRuler.endPx },
         { left: MARGIN.left, top: MARGIN.top, w: plotW, h: plotH },
         displayXAxisMode, data.time_min, yToBytes, xToTime);
     }
@@ -749,7 +907,7 @@ export default function PhaseTimeline({
   // hoverAlloc / hoverAnomaly are NOT in deps: they live in refs and
   // the rAF loop picks up changes via invalidate(). Adding them would
   // undo the whole point of the refactor.
-  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedAlloc, stripIndex, framePool, maxBytesFull]);
+  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedAlloc, stripIndex, framePool, maxBytesFull, materializeRuler, closeRectForRuler]);
 
 
   const hitTest = useCallback(
@@ -898,11 +1056,10 @@ export default function PhaseTimeline({
 
       // Ruler dragging — clamp to plot area, update immediately.
       if (rulerDragRef.current) {
-        const { type, startPx } = rulerDragRef.current;
+        const drag = rulerDragRef.current;
         const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
         const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
-        const endPx = type === "vertical" ? { x: startPx.x, y: cy } : { x: cx, y: startPx.y };
-        rulerRef.current = { type, startPx, endPx };
+        drag.endPx = drag.type === "vertical" ? { x: drag.startPx.x, y: cy } : { x: cx, y: drag.startPx.y };
         invalidate();
         return;
       }
@@ -938,6 +1095,13 @@ export default function PhaseTimeline({
         return;
       }
 
+      const rulerHit = hitTestRuler(mx, my);
+      const nextHoverRulerId = rulerHit?.id ?? null;
+      if (hoverRulerIdRef.current !== nextHoverRulerId) {
+        hoverRulerIdRef.current = nextHoverRulerId;
+        invalidate();
+      }
+
       // Non-drag hover — coalesce to rAF so fast mouse motion doesn't
       // trigger N hitTests per frame.
       hoverPendingRef.current = { mx, my };
@@ -945,7 +1109,7 @@ export default function PhaseTimeline({
         hoverRafRef.current = requestAnimationFrame(runHoverDetection);
       }
     },
-    [plotW, plotH, runHoverDetection, viewRangeRef, clampXRange, clampYRange],
+    [plotW, plotH, runHoverDetection, viewRangeRef, clampXRange, clampYRange, hitTestRuler],
   );
 
   const handleWheel = useCallback(
@@ -986,10 +1150,19 @@ export default function PhaseTimeline({
 
       // Escape dismisses ruler
       if (key === "escape") {
-        rulerRef.current = null;
+        rulersRef.current = [];
+        hoverRulerIdRef.current = null;
         rulerDragRef.current = null;
         invalidate();
         e.preventDefault();
+        return;
+      }
+
+      if (key === "delete" || key === "backspace") {
+        if (hoverRulerIdRef.current != null) {
+          deleteRuler(hoverRulerIdRef.current);
+          e.preventDefault();
+        }
         return;
       }
 
@@ -1001,7 +1174,7 @@ export default function PhaseTimeline({
         e.preventDefault();
       }
     },
-    [],
+    [deleteRuler],
   );
 
   const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
@@ -1024,15 +1197,22 @@ export default function PhaseTimeline({
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
 
+      const rulerHit = hitTestRuler(mx, my);
+      if (rulerHit?.close) {
+        deleteRuler(rulerHit.id);
+        e.preventDefault();
+        return;
+      }
+
       // Start ruler if R or T is held — clamp to plot area
       const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
       const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
       if (keysDownRef.current.has("r")) {
-        rulerDragRef.current = { type: "vertical", startPx: { x: cx, y: cy } };
+        rulerDragRef.current = { type: "vertical", startPx: { x: cx, y: cy }, endPx: { x: cx, y: cy } };
         return;
       }
       if (keysDownRef.current.has("t")) {
-        rulerDragRef.current = { type: "horizontal", startPx: { x: cx, y: cy } };
+        rulerDragRef.current = { type: "horizontal", startPx: { x: cx, y: cy }, endPx: { x: cx, y: cy } };
         return;
       }
 
@@ -1058,14 +1238,28 @@ export default function PhaseTimeline({
         moved: false,
       };
     },
-    [plotW, plotH, viewRangeRef],
+    [plotW, plotH, viewRangeRef, hitTestRuler, deleteRuler],
   );
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent) => {
       // Finish ruler drag
       if (rulerDragRef.current) {
+        const ruler = {
+          type: rulerDragRef.current.type,
+          startPx: rulerDragRef.current.startPx,
+          endPx: rulerDragRef.current.endPx,
+        };
+        const span = ruler.type === "vertical"
+          ? Math.abs(ruler.endPx.y - ruler.startPx.y)
+          : Math.abs(ruler.endPx.x - ruler.startPx.x);
+        if (span > 4) {
+          const stored = toStoredRuler(ruler);
+          rulersRef.current = [...rulersRef.current, stored];
+          hoverRulerIdRef.current = stored.id;
+        }
         rulerDragRef.current = null;
+        invalidate();
         return;
       }
 
@@ -1076,13 +1270,15 @@ export default function PhaseTimeline({
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
         if (!pan.moved) {
-          const anomHover = hoverAnomalyRef.current;
-          if (anomHover) {
-            const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
-            setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
-          } else {
-            const hit = hoverAllocRef.current ?? hitTest(mx, my);
-            setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+          if (!maybeResetFromShortDoubleClick(mx, my)) {
+            const anomHover = hoverAnomalyRef.current;
+            if (anomHover) {
+              const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
+              setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
+            } else {
+              const hit = hoverAllocRef.current ?? hitTest(mx, my);
+              setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+            }
           }
         }
         invalidate();
@@ -1129,15 +1325,17 @@ export default function PhaseTimeline({
           // was seeing in the hover card, so selecting the same thing is
           // "what you see is what you pick" — avoids losing thin strips
           // to 1-2 px mousedown drift that a fresh hitTest would catch.
-          const anomHover = hoverAnomalyRef.current;
-          if (anomHover) {
-            // Anomaly flags carry an addr only — resolve the exact
-            // alloc via alloc_us from the live list.
-            const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
-            setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
-          } else {
-            const hit = hoverAllocRef.current ?? hitTest(mx, my);
-            setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+          if (!maybeResetFromShortDoubleClick(mx, my)) {
+            const anomHover = hoverAnomalyRef.current;
+            if (anomHover) {
+              // Anomaly flags carry an addr only — resolve the exact
+              // alloc via alloc_us from the live list.
+              const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
+              setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
+            } else {
+              const hit = hoverAllocRef.current ?? hitTest(mx, my);
+              setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+            }
           }
         }
       }
@@ -1145,7 +1343,7 @@ export default function PhaseTimeline({
       selRectRef.current = null;
       invalidate();
     },
-    [hitTest, anomalies, timeToX, xToTime, yToBytes, plotW, plotH, xAxisMode, setSelectedAlloc, allocs],
+    [hitTest, xToTime, yToBytes, plotW, plotH, xAxisMode, setSelectedAlloc, allocs, toStoredRuler, maybeResetFromShortDoubleClick],
   );
 
   const cursorStyle = rulerDragRef.current
@@ -1181,17 +1379,12 @@ export default function PhaseTimeline({
             hoverPendingRef.current = null;
             hoverAllocRef.current = null;
             hoverAnomalyRef.current = null;
+            hoverRulerIdRef.current = null;
             updateHoverCard();
             selStartRef.current = null;
             selRectRef.current = null;
             panDragRef.current = null;
             if (rulerDragRef.current) rulerDragRef.current = null;
-            invalidate();
-          }}
-          onDoubleClick={() => {
-            if (xAxisMode === "event") viewRangeRef.current = [0, totalXRange];
-            else viewRangeRef.current = [data.time_min, data.time_max];
-            manualYRangeRef.current = null;
             invalidate();
           }}
         />
@@ -1326,8 +1519,11 @@ export default function PhaseTimeline({
           color: var(--fg-dim);
           padding: 0;
         }
-        .tl-stack-frame[data-py="1"] { color: var(--fg-muted); }
-        .tl-stack-frame[data-py="1"] .tl-stack-loc { color: var(--accent); opacity: 0.8; }
+        .tl-stack-frame[data-py="1"],
+        .tl-stack-frame[data-op="1"] { color: var(--fg-muted); }
+        .tl-stack-frame[data-py="1"] .tl-stack-loc,
+        .tl-stack-frame[data-op="1"] .tl-stack-loc { color: var(--accent); opacity: 0.8; }
+        .tl-stack-frame[data-op="1"] .tl-stack-name { color: #67e8f9; }
         .tl-stack-name { color: inherit; }
         .tl-stack-loc { color: var(--fg-dim); }
       `}</style>

@@ -187,7 +187,7 @@ function Dashboard() {
         id: "details",
         label: "Details",
         render: () => (
-          <div className="tray-pad">
+          <div className="tray-pad tray-pad-details">
             <TimelineDetailPanel />
           </div>
         ),

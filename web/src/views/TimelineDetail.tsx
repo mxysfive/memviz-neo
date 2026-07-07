@@ -3,7 +3,7 @@
 // below the Segment Timeline so the two plots sit flush against each
 // other. Reads selection state from dataStore; no props.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useDataStore } from "../stores/dataStore";
 import type { AllocationDetail } from "../types/timeline";
 import { formatBytes, isInternalFrame } from "../utils";
@@ -44,14 +44,9 @@ export function TimelineDetailPanel() {
   const segments = useDataStore((s) => s.segments);
   const getDetail = useDataStore((s) => s.getDetail);
   const timeAxis = useDataStore((s) => s.timeline?.time_axis || "time_us");
-  const [detail, setDetail] = useState<AllocationDetail | null>(null);
-
-  useEffect(() => {
-    if (!selectedAlloc) {
-      setDetail(null);
-      return;
-    }
-    setDetail(getDetail(currentRank, selectedAlloc.addr, selectedAlloc.alloc_us));
+  const detail = useMemo<AllocationDetail | null>(() => {
+    if (!selectedAlloc) return null;
+    return getDetail(currentRank, selectedAlloc.addr, selectedAlloc.alloc_us);
   }, [selectedAlloc, currentRank, getDetail]);
 
   // Cmd/Ctrl+C: copy stack trace. Kept here (not in PhaseTimeline) so it

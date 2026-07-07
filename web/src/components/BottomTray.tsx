@@ -252,6 +252,7 @@ export default function BottomTray({
         .tray-collapse:hover { color: var(--fg); }
         .tray-body {
           flex: 1 1 auto;
+          min-height: 0;
           overflow: auto;
         }
         .scope-chip {

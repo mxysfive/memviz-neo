@@ -101,13 +101,12 @@ export default function PhaseTimeline({
   anomalies,
   width,
   height,
-  currentRank,
   viewRangeRef: sharedViewRangeRef,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);   // 2D overlay
   const glCanvasRef = useRef<HTMLCanvasElement>(null);  // WebGL strips
   const glRef = useRef<GLState | null>(null);
-  const stripKeyRef = useRef("");
+  const uploadedStripBufferRef = useRef<Float32Array | null>(null);
 
   // Imperative state: these change at 60+Hz (pan, drag, ruler move).
   // Keeping them in refs means mousemove/keydown don't cause React to
@@ -534,16 +533,15 @@ export default function PhaseTimeline({
     if (!glCanvas || !stripBuffer) return;
     if (!glRef.current) glRef.current = initGL(glCanvas);
     if (!glRef.current) return;
-    // Include xAxisMode in the cache key — switching modes changes the
-    // *values* in stripBuffer (event indices vs μs) without changing
-    // rank or stripCount, so a rank-only key stale-GPU's the data.
-    const key = `${currentRank}-${stripCount}-${xAxisMode}`;
-    if (key !== stripKeyRef.current) {
+    // Upload exactly when the backing buffer changes. Re-loading another
+    // file can keep the same rank + stripCount while carrying different
+    // bytes, so caching by metadata can stale-GPU the timeline.
+    if (stripBuffer !== uploadedStripBufferRef.current) {
       uploadStrips(glRef.current, stripBuffer, stripCount);
-      stripKeyRef.current = key;
+      uploadedStripBufferRef.current = stripBuffer;
       invalidate();
     }
-  }, [stripBuffer, stripCount, currentRank, xAxisMode]);
+  }, [stripBuffer, stripCount]);
 
   // --- Render: WebGL strips + 2D overlay, driven by a single rAF loop ---
   //
@@ -1507,12 +1505,12 @@ export default function PhaseTimeline({
         </div>
         <canvas
           ref={glCanvasRef}
-          style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}
+          style={{ position: "absolute", top: 0, left: 0, zIndex: 0, pointerEvents: "none" }}
         />
         <canvas
           ref={canvasRef}
           className="tl-canvas"
-          style={{ position: "relative", background: "transparent" }}
+          style={{ position: "relative", zIndex: 1, background: "transparent" }}
           tabIndex={0}
           onKeyDown={handleKeyDown}
           onKeyUp={handleKeyUp}

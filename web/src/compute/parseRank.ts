@@ -242,6 +242,7 @@ function packStrips(
       free_us: freeUs,
       alive,
       top_frame_idx: a.top_frame_idx,
+      stack_idx: a.stack_idx,
       idx: i,
       stripOffset: startStripIdx,
       stripCount: stripsPerAlloc[i].length,

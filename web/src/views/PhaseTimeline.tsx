@@ -1,8 +1,9 @@
-import { useRef, useEffect, useCallback, useMemo } from "react";
+import { useRef, useEffect, useCallback, useMemo, useState } from "react";
 import type {
   TimelineData,
   TimelineAlloc,
 } from "../types/timeline";
+import type { FrameRecord } from "../types/snapshot";
 import { STRIP_FLOATS } from "../types/timeline";
 import { formatBytes, formatTopFrame } from "../utils";
 import { useDataStore } from "../stores/dataStore";
@@ -57,6 +58,40 @@ type StoredRuler =
 interface RulerHit {
   id: number;
   close: boolean;
+}
+
+function normalizeStackTerms(raw: string): string[] {
+  return raw.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function frameText(f: FrameRecord | undefined): string {
+  if (!f) return "";
+  return `${f.name} ${f.filename} ${f.line} ${f.filename}:${f.line}`.toLowerCase();
+}
+
+function allocMatchesStackTerms(
+  alloc: TimelineAlloc,
+  terms: string[],
+  frameTexts: string[],
+  stackPool: Uint32Array[],
+): boolean {
+  if (terms.length === 0) return false;
+  const stack = stackPool[alloc.stack_idx];
+  if (stack && stack.length > 0) {
+    for (const term of terms) {
+      let found = false;
+      for (let i = 0; i < stack.length; i++) {
+        if ((frameTexts[stack[i]] ?? "").includes(term)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
+  const top = frameTexts[alloc.top_frame_idx] ?? "";
+  return terms.every((term) => top.includes(term));
 }
 
 
@@ -206,6 +241,27 @@ export default function PhaseTimeline({
     : (data.time_max - data.time_min);
   const stripCount = useDataStore((s) => s.timelineStripCount);
   const framePool = useDataStore((s) => s.framePool);
+  const stackPool = useDataStore((s) => s.stackPool);
+  const [stackQuery, setStackQuery] = useState("");
+  const stackTerms = useMemo(() => normalizeStackTerms(stackQuery), [stackQuery]);
+  const stackFrameTexts = useMemo(() => framePool.map(frameText), [framePool]);
+  const stackMatches = useMemo(() => {
+    if (stackTerms.length === 0) return [];
+    const out: TimelineAlloc[] = [];
+    for (const alloc of allocs) {
+      if (allocMatchesStackTerms(alloc, stackTerms, stackFrameTexts, stackPool)) out.push(alloc);
+    }
+    return out;
+  }, [allocs, stackTerms, stackFrameTexts, stackPool]);
+  const stackMatchSet = useMemo(() => {
+    const set = new Set<number>();
+    for (const alloc of stackMatches) set.add(alloc.idx);
+    return set;
+  }, [stackMatches]);
+  const selectedStackMatchOrdinal = useMemo(() => {
+    if (!selectedAlloc || stackMatches.length === 0) return -1;
+    return stackMatches.findIndex((alloc) => alloc.idx === selectedAlloc.idx);
+  }, [selectedAlloc, stackMatches]);
 
   // One-pass bucket index: per-bucket max-y (Y auto-fit) + per-bucket
   // candidate alloc lists (hit-test). O(B) reads per frame instead of
@@ -327,6 +383,29 @@ export default function PhaseTimeline({
     [data.peak_bytes, maxBytesFull],
   );
 
+  const selectStackMatch = useCallback((direction: -1 | 1 | 0) => {
+    if (stackMatches.length === 0) return;
+    const current = selectedAlloc
+      ? stackMatches.findIndex((alloc) => alloc.idx === selectedAlloc.idx)
+      : -1;
+    const nextIdx = direction === 0 || current < 0
+      ? (direction < 0 ? stackMatches.length - 1 : 0)
+      : (current + direction + stackMatches.length) % stackMatches.length;
+    const match = stackMatches[nextIdx];
+    setSelectedAlloc({ addr: match.addr, alloc_us: match.alloc_us });
+
+    const start = usToView(match.alloc_us);
+    const end = usToView(match.free_us);
+    const [v0, v1] = viewRangeRef.current;
+    const currentSpan = Math.max(1, v1 - v0);
+    const minSpan = xAxisMode === "event" ? 1 : 100;
+    const matchSpan = Math.max(minSpan, end - start);
+    const targetSpan = Math.max(matchSpan * 1.8, currentSpan * 0.18, xAxisMode === "event" ? 24 : 10000);
+    const center = (start + end) / 2;
+    viewRangeRef.current = clampXRange(center - targetSpan / 2, center + targetSpan / 2);
+    invalidate();
+  }, [stackMatches, selectedAlloc, setSelectedAlloc, usToView, viewRangeRef, xAxisMode, clampXRange]);
+
   const resetView = useCallback(() => {
     if (xAxisMode === "event") viewRangeRef.current = [0, totalXRange];
     else viewRangeRef.current = [data.time_min, data.time_max];
@@ -334,6 +413,10 @@ export default function PhaseTimeline({
     lastPlotClickRef.current = null;
     invalidate();
   }, [xAxisMode, viewRangeRef, totalXRange, data.time_min, data.time_max]);
+
+  useEffect(() => {
+    invalidate();
+  }, [stackMatchSet]);
 
   const maybeResetFromShortDoubleClick = useCallback((mx: number, my: number): boolean => {
     const now = performance.now();
@@ -540,20 +623,19 @@ export default function PhaseTimeline({
       const tMinN = tMin - t0;
       const tMaxN = tMax - t0;
 
-      // Selection highlight — one alloc spans many strips (each strip is
-      // a time slice where its y-offset is constant). Group temporally
-      // adjacent strips into runs and stroke one polygon per run so the
-      // outline traces only the outer contour.
-      if (selectedAlloc && buf) {
-        ctx.strokeStyle = "rgba(0,0,0,0.92)";
-        ctx.lineWidth = 3;
-        const off0 = selectedAlloc.stripOffset;
-        const count = selectedAlloc.stripCount;
-        const sz = selectedAlloc.size;
+      const drawAllocOutline = (alloc: TimelineAlloc, strokeStyle: string, lineWidth: number) => {
+        if (!buf) return;
+        const off0 = alloc.stripOffset;
+        const count = alloc.stripCount;
+        const sz = alloc.size;
         type Seg = { x1: number; x2: number; yTop: number; yBot: number };
         const run: Seg[] = [];
         const flush = () => {
           if (run.length === 0) return;
+          ctx.save();
+          ctx.strokeStyle = strokeStyle;
+          ctx.lineWidth = lineWidth;
+          ctx.lineJoin = "round";
           ctx.beginPath();
           const first = run[0];
           ctx.moveTo(first.x1, first.yTop);
@@ -569,6 +651,7 @@ export default function PhaseTimeline({
           }
           ctx.closePath();
           ctx.stroke();
+          ctx.restore();
           run.length = 0;
         };
         let lastTe = -Infinity;
@@ -589,7 +672,7 @@ export default function PhaseTimeline({
           lastTe = te;
         }
         flush();
-      }
+      };
 
       // Compute visible alloc indices via the time-bucket index.
       // Without this we'd scan all N allocs twice per frame (labels +
@@ -750,6 +833,24 @@ export default function PhaseTimeline({
             );
           }
         }
+
+        if (stackMatchSet.size > 0) {
+          const nSearch = visibleBIs ? visibleCount : allocs.length;
+          let outlined = 0;
+          for (let idx = 0; idx < nSearch; idx++) {
+            const alloc = allocs[visibleBIs ? visibleBIs[idx] : idx];
+            if (!stackMatchSet.has(alloc.idx)) continue;
+            if (selectedAlloc && alloc.idx === selectedAlloc.idx) continue;
+            drawAllocOutline(alloc, "rgba(255,255,255,0.60)", 3);
+            drawAllocOutline(alloc, "rgba(10,10,11,0.86)", 1.5);
+            outlined++;
+            if (outlined >= 1200) break;
+          }
+        }
+
+        if (selectedAlloc) {
+          drawAllocOutline(selectedAlloc, "rgba(0,0,0,0.94)", 3);
+        }
       }
 
       // Anomaly flags — capped to top N by severity to keep the plot readable
@@ -860,6 +961,11 @@ export default function PhaseTimeline({
       }
     }
 
+    if (hoverResolved && buf && !selRect) {
+      drawAllocOutline(hoverResolved, "rgba(255,255,255,0.92)", 4);
+      drawAllocOutline(hoverResolved, "rgba(0,0,0,0.96)", 2);
+    }
+
     // Rulers
     for (const stored of rulersRef.current) {
       const ruler = materializeRuler(stored);
@@ -907,7 +1013,7 @@ export default function PhaseTimeline({
   // hoverAlloc / hoverAnomaly are NOT in deps: they live in refs and
   // the rAF loop picks up changes via invalidate(). Adding them would
   // undo the whole point of the refactor.
-  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedAlloc, stripIndex, framePool, maxBytesFull, materializeRuler, closeRectForRuler]);
+  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, usToView, bytesToY, yToBytes, plotW, plotH, selectedAlloc, stripIndex, framePool, maxBytesFull, materializeRuler, closeRectForRuler, stackMatchSet, timeOrigin, displayXAxisMode]);
 
 
   const hitTest = useCallback(
@@ -1351,10 +1457,54 @@ export default function PhaseTimeline({
     : panDragRef.current
       ? "grabbing"
       : "grab";
+  const stackMatchLabel = stackTerms.length === 0
+    ? ""
+    : `${selectedStackMatchOrdinal >= 0 ? selectedStackMatchOrdinal + 1 : 0}/${stackMatches.length}`;
 
   return (
     <div>
       <div style={{ position: "relative", cursor: cursorStyle }}>
+        <div
+          className="tl-stack-search"
+          onMouseDown={(e) => e.stopPropagation()}
+          onMouseMove={(e) => e.stopPropagation()}
+          onWheel={(e) => e.stopPropagation()}
+        >
+          <input
+            type="search"
+            value={stackQuery}
+            placeholder="stack search"
+            spellCheck={false}
+            onChange={(e) => setStackQuery(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                selectStackMatch(e.shiftKey ? -1 : 1);
+                e.preventDefault();
+              } else if (e.key === "Escape") {
+                setStackQuery("");
+                e.preventDefault();
+              }
+            }}
+          />
+          <button
+            type="button"
+            aria-label="Previous stack match"
+            disabled={stackMatches.length === 0}
+            onClick={() => selectStackMatch(-1)}
+          >
+            Prev
+          </button>
+          <button
+            type="button"
+            aria-label="Next stack match"
+            disabled={stackMatches.length === 0}
+            onClick={() => selectStackMatch(1)}
+          >
+            Next
+          </button>
+          <span>{stackMatchLabel}</span>
+        </div>
         <canvas
           ref={glCanvasRef}
           style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}
@@ -1452,6 +1602,59 @@ export default function PhaseTimeline({
           line-height: 1.5;
           backdrop-filter: blur(12px);
           box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .tl-stack-search {
+          position: absolute;
+          top: 4px;
+          left: 96px;
+          z-index: 4;
+          display: grid;
+          grid-template-columns: minmax(150px, 260px) auto auto 52px;
+          align-items: center;
+          gap: 6px;
+          pointer-events: auto;
+          font-family: var(--font-mono);
+          font-size: 11px;
+        }
+        .tl-stack-search input,
+        .tl-stack-search button,
+        .tl-stack-search span {
+          height: 24px;
+          box-sizing: border-box;
+          border: 1px solid rgba(250,250,250,0.16);
+          background: rgba(10,10,11,0.78);
+          color: var(--fg-muted);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+        }
+        .tl-stack-search input {
+          min-width: 0;
+          padding: 0 8px;
+          outline: none;
+        }
+        .tl-stack-search input:focus {
+          border-color: rgba(255,255,255,0.45);
+          color: var(--fg);
+        }
+        .tl-stack-search button {
+          padding: 0 8px;
+          cursor: pointer;
+        }
+        .tl-stack-search button:disabled {
+          color: var(--fg-dim);
+          cursor: default;
+          opacity: 0.55;
+        }
+        .tl-stack-search button:not(:disabled):hover {
+          border-color: rgba(255,255,255,0.38);
+          color: var(--fg);
+        }
+        .tl-stack-search span {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0 6px;
+          color: var(--fg-faint);
         }
         .tl-hover-card {
           position: absolute;

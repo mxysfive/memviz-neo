@@ -1,53 +1,69 @@
 // Semantic coloring for timeline blocks.
 //
-// The base hue is still derived from the block's "top frame" (first
-// meaningful frame in the call stack), but repeated allocations from one
-// site deliberately jump around the color wheel instead of only changing
-// lightness. Training traces often execute one op hundreds of times in a
-// row; if those blocks all stay in one hue family, adjacent blocks become
-// hard to distinguish.
-//
-// Worker-friendly: no DOM / GL imports.
+// PyTorch's upstream MemoryViz uses d3.schemeTableau10, which reads much
+// calmer on a dark UI than highly-saturated HSL colors. We keep that
+// spirit here: stable Tableau-family colors, small per-instance variation,
+// and a dark-background mix so large traces do not turn into neon noise.
 
-function hslToRgb(h: number, s: number, l: number): [number, number, number] {
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r = 0, g = 0, b = 0;
-  if (h < 60) { r = c; g = x; }
-  else if (h < 120) { r = x; g = c; }
-  else if (h < 180) { g = c; b = x; }
-  else if (h < 240) { g = x; b = c; }
-  else if (h < 300) { r = x; b = c; }
-  else { r = c; b = x; }
-  return [r + m, g + m, b + m];
-}
+const TABLEAU10: Array<[number, number, number]> = [
+  [78, 121, 167],
+  [242, 142, 43],
+  [225, 87, 89],
+  [118, 183, 178],
+  [89, 161, 79],
+  [237, 201, 72],
+  [176, 122, 161],
+  [255, 157, 167],
+  [156, 117, 95],
+  [186, 176, 172],
+].map(([r, g, b]) => [r / 255, g / 255, b / 255] as [number, number, number]);
 
-const PHI  = 0.61803398875;
-const PHI2 = 0.41421356237;
+const BG: [number, number, number] = [0.04, 0.04, 0.045];
+const PAPER: [number, number, number] = [0.93, 0.93, 0.90];
 
-function hash01(n: number): number {
+function hash32(n: number): number {
   let x = n | 0;
   x ^= x >>> 16;
   x = Math.imul(x, 0x7feb352d);
   x ^= x >>> 15;
   x = Math.imul(x, 0x846ca68b);
   x ^= x >>> 16;
-  return (x >>> 0) / 0x100000000;
+  return x >>> 0;
+}
+
+function mix(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ];
+}
+
+function clamp01(x: number): number {
+  return Math.max(0, Math.min(1, x));
 }
 
 /**
  * Stable color for one timeline block.
- *   hueKey     — groups blocks that share meaning (usually top_frame_idx;
- *                callers fall back to stack_idx / addr when no frame).
- *   instanceIdx — 0-based counter among blocks sharing the same hueKey.
- *                 Drives high-contrast hue jumps for repeated allocs
- *                 from the same line/operator.
+ *   hueKey      groups blocks with related meaning, usually top_frame_idx.
+ *   instanceIdx spreads repeated allocations across nearby Tableau colors.
  */
 export function blockColor(hueKey: number, instanceIdx: number): [number, number, number] {
-  const base = hash01(hueKey);
-  const hue = ((base + instanceIdx * PHI) % 1) * 360;
-  const lig = 0.48 + hash01(hueKey ^ Math.imul(instanceIdx + 1, 0x9e3779b1)) * 0.22;
-  const sat = 0.62 + ((instanceIdx * PHI2 + base) % 1) * 0.24;
-  return hslToRgb(hue, sat, lig);
+  const h = hash32(hueKey);
+  const baseIdx = (h + instanceIdx * 3) % TABLEAU10.length;
+  const neighborIdx = (baseIdx + 1 + ((h >>> 8) % 3)) % TABLEAU10.length;
+  const base = TABLEAU10[baseIdx];
+  const neighbor = TABLEAU10[neighborIdx];
+
+  // Keep repeated allocations distinguishable without full hue-wheel jumps.
+  const familyShift = (instanceIdx % 4) * 0.08;
+  const blended = mix(base, neighbor, familyShift);
+  const softened = mix(blended, BG, 0.18);
+  const lifted = mix(softened, PAPER, 0.06 + ((h >>> 16) % 3) * 0.025);
+
+  return [
+    clamp01(lifted[0]),
+    clamp01(lifted[1]),
+    clamp01(lifted[2]),
+  ];
 }

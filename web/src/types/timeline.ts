@@ -53,6 +53,8 @@ export interface TimelineAlloc {
   alive: boolean;
   /** Index into RankData.framePool; -1 if unknown. */
   top_frame_idx: number;
+  /** Index into RankData.stackPool; -1 if unknown. */
+  stack_idx: number;
   idx: number;
   stripOffset: number;
   stripCount: number;

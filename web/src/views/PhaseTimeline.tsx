@@ -75,6 +75,7 @@ function allocMatchesStackTerms(
   frameTexts: string[],
   stackPool: Uint32Array[],
 ): boolean {
+  if (alloc.isHidden) return false;
   if (terms.length === 0) return false;
   const stack = stackPool[alloc.stack_idx];
   if (stack && stack.length > 0) {
@@ -775,7 +776,9 @@ export default function PhaseTimeline({
             }
           }
           if (bestW < 100 || bestH < 14) continue;
-          const label = formatTopFrame(alloc.top_frame_idx, framePool) || `0x${alloc.addr.toString(16)}`;
+          const label = alloc.isHidden
+            ? "hidden allocations"
+            : (formatTopFrame(alloc.top_frame_idx, framePool) || `0x${alloc.addr.toString(16)}`);
           const maxChars = Math.floor(bestW / 6.5);
           const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
           ctx.fillStyle = "rgba(250,250,250,0.95)";
@@ -791,6 +794,7 @@ export default function PhaseTimeline({
         const nPending = visibleBIs ? visibleCount : allocs.length;
         for (let idx = 0; idx < nPending; idx++) {
           const alloc = allocs[visibleBIs ? visibleBIs[idx] : idx];
+          if (alloc.isHidden) continue;
           if (alloc.free_requested_us <= 0) continue;
           if (alloc.size * yScale < 0.5) continue;
           const frqN = alloc.free_requested_us - t0;
@@ -1100,16 +1104,25 @@ export default function PhaseTimeline({
       se.textContent = ha.anomaly.label;
       te.textContent = formatTopFrame(ha.anomaly.top_frame_idx, framePool);
     } else if (hb) {
-      card.style.borderLeft = "2px solid var(--accent)";
-      eb.style.color = "var(--fg-faint)";
-      eb.textContent = "Block";
-      pr.textContent = formatBytes(hb.size);
-      se.textContent = formatTopFrame(hb.top_frame_idx, framePool) || `0x${hb.addr.toString(16)}`;
-      const span = hb.free_us - hb.alloc_us;
-      const dur = data.time_axis === "event_ordinal"
-        ? `${Math.round(span).toLocaleString()} events`
-        : `${(span / 1e6).toFixed(4)}s`;
-      te.textContent = hb.alive ? `${dur} · alive` : dur;
+      if (hb.isHidden) {
+        card.style.borderLeft = "2px solid rgba(250,250,250,0.72)";
+        eb.style.color = "var(--fg-faint)";
+        eb.textContent = "Hidden Allocations";
+        pr.textContent = formatBytes(hb.size);
+        se.textContent = `${(hb.hiddenCount ?? 1).toLocaleString()} allocations grouped in this interval`;
+        te.textContent = hb.hiddenReason || "Current display budget is too small to expand detailed stacks here.";
+      } else {
+        card.style.borderLeft = "2px solid var(--accent)";
+        eb.style.color = "var(--fg-faint)";
+        eb.textContent = "Block";
+        pr.textContent = formatBytes(hb.size);
+        se.textContent = formatTopFrame(hb.top_frame_idx, framePool) || `0x${hb.addr.toString(16)}`;
+        const span = hb.free_us - hb.alloc_us;
+        const dur = data.time_axis === "event_ordinal"
+          ? `${Math.round(span).toLocaleString()} events`
+          : `${(span / 1e6).toFixed(4)}s`;
+        te.textContent = hb.alive ? `${dur} · alive` : dur;
+      }
     }
     card.style.display = "block";
   }, [framePool, data.time_axis]);
@@ -1381,7 +1394,7 @@ export default function PhaseTimeline({
               setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
             } else {
               const hit = hoverAllocRef.current ?? hitTest(mx, my);
-              setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+              setSelectedAlloc(hit && !hit.isHidden ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
             }
           }
         }
@@ -1438,7 +1451,7 @@ export default function PhaseTimeline({
               setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
             } else {
               const hit = hoverAllocRef.current ?? hitTest(mx, my);
-              setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
+              setSelectedAlloc(hit && !hit.isHidden ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
             }
           }
         }

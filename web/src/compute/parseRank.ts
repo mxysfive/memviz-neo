@@ -50,6 +50,14 @@ interface ParseRankOptions {
   layoutLimit?: number;
 }
 
+interface HiddenStripIR {
+  tStart: number;
+  tEnd: number;
+  yOffset: number;
+  size: number;
+  count: number;
+}
+
 // Port of the Rust build_layout (removed from WASM). O(N²) over the
 // currently-rendered allocation subset.
 // Output: flat array of [li, t_start, t_end, y_offset] quadruples.
@@ -82,8 +90,8 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
   });
 
   // Stack of live ids + sizes, parallel arrays. pos[li] = index into stack or -1.
-  const skId: number[] = new Array(n);
-  const skSz: number[] = new Array(n);
+  const skId = new Int32Array(n);
+  const skSz = new Float64Array(n);
   let skLen = 0;
   const pos = new Int32Array(n).fill(-1);
   const tSt = new Float64Array(n);
@@ -91,11 +99,25 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
   const act = new Uint8Array(n);
   let stot = 0;
 
-  // Output grows; size unknown upfront. Use plain array and flatten.
-  const outLi: number[] = [];
-  const outTs: number[] = [];
-  const outTe: number[] = [];
-  const outYo: number[] = [];
+  // Output grows; size unknown upfront. Keep it as one flat typed buffer
+  // to avoid four push-heavy JS arrays in show-all layouts.
+  let outCap = Math.max(16, n * 2);
+  let outN = 0;
+  let out = new Float64Array(outCap * 4);
+  const pushStrip = (liOut: number, ts: number, te: number, yo: number) => {
+    if (outN >= outCap) {
+      outCap *= 2;
+      const next = new Float64Array(outCap * 4);
+      next.set(out);
+      out = next;
+    }
+    const off = outN * 4;
+    out[off] = liOut;
+    out[off + 1] = ts;
+    out[off + 2] = te;
+    out[off + 3] = yo;
+    outN++;
+  };
 
   for (let k = 0; k < evN; k++) {
     const i = orderArr[k];
@@ -116,7 +138,7 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
       const p = pos[li];
       if (p === -1) continue;
       if (tSt[li] < time) {
-        outLi.push(li); outTs.push(tSt[li]); outTe.push(time); outYo.push(y[li]);
+        pushStrip(li, tSt[li], time, y[li]);
       }
       act[li] = 0;
       pos[li] = -1;
@@ -133,7 +155,7 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
         pos[ai] = j;
         const oy = y[ai];
         if (tSt[ai] < time) {
-          outLi.push(ai); outTs.push(tSt[ai]); outTe.push(time); outYo.push(oy);
+          pushStrip(ai, tSt[ai], time, oy);
         }
         tSt[ai] = time;
         y[ai] = oy - freed;
@@ -143,18 +165,78 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
   // Close any still-live strips to t_max.
   for (let li = 0; li < n; li++) {
     if (act[li] && tSt[li] < tMax) {
-      outLi.push(li); outTs.push(tSt[li]); outTe.push(tMax); outYo.push(y[li]);
+      pushStrip(li, tSt[li], tMax, y[li]);
     }
   }
-  const m = outLi.length;
-  const flat = new Float64Array(m * 4);
-  for (let i = 0; i < m; i++) {
-    flat[i * 4] = outLi[i];
-    flat[i * 4 + 1] = outTs[i];
-    flat[i * 4 + 2] = outTe[i];
-    flat[i * 4 + 3] = outYo[i];
+  return out.slice(0, outN * 4);
+}
+
+function buildHiddenStrips(
+  detailAllocs: TopAllocIR[],
+  hiddenAllocs: TopAllocIR[],
+  timeMin: number,
+  timeMax: number,
+): HiddenStripIR[] {
+  if (hiddenAllocs.length === 0) return [];
+
+  type Ev = {
+    time: number;
+    detailDelta: number;
+    hiddenDelta: number;
+    hiddenCountDelta: number;
+  };
+  const events: Ev[] = [];
+  const addAllocEvents = (a: TopAllocIR, hidden: boolean) => {
+    const endRaw = a.free_us === -1 ? timeMax : a.free_us;
+    const start = Math.max(timeMin, Math.min(timeMax, a.alloc_us));
+    const end = Math.max(timeMin, Math.min(timeMax, endRaw));
+    if (start >= end) return;
+    if (hidden) {
+      events.push({ time: start, detailDelta: 0, hiddenDelta: a.size, hiddenCountDelta: 1 });
+      events.push({ time: end, detailDelta: 0, hiddenDelta: -a.size, hiddenCountDelta: -1 });
+    } else {
+      events.push({ time: start, detailDelta: a.size, hiddenDelta: 0, hiddenCountDelta: 0 });
+      events.push({ time: end, detailDelta: -a.size, hiddenDelta: 0, hiddenCountDelta: 0 });
+    }
+  };
+
+  for (const a of detailAllocs) addAllocEvents(a, false);
+  for (const a of hiddenAllocs) addAllocEvents(a, true);
+  if (events.length === 0) return [];
+
+  events.sort((a, b) => a.time - b.time);
+  const out: HiddenStripIR[] = [];
+  let detailLive = 0;
+  let hiddenLive = 0;
+  let hiddenCount = 0;
+  let i = 0;
+  while (i < events.length) {
+    const t = events[i].time;
+    while (i < events.length && events[i].time === t) {
+      detailLive += events[i].detailDelta;
+      hiddenLive += events[i].hiddenDelta;
+      hiddenCount += events[i].hiddenCountDelta;
+      i++;
+    }
+    const next = i < events.length ? events[i].time : timeMax;
+    if (next <= t || hiddenLive <= 0 || hiddenCount <= 0) continue;
+    const yOffset = Math.max(0, detailLive);
+    const size = Math.max(0, hiddenLive);
+    const count = Math.max(1, hiddenCount);
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      prev.tEnd === t &&
+      prev.yOffset === yOffset &&
+      prev.size === size &&
+      prev.count === count
+    ) {
+      prev.tEnd = next;
+    } else {
+      out.push({ tStart: t, tEnd: next, yOffset, size, count });
+    }
   }
-  return flat;
+  return out;
 }
 
 /**
@@ -169,24 +251,37 @@ function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
 function packStrips(
   topAllocsIR: TopAllocIR[],
   stripsFlat: Float64Array,
+  hiddenStrips: HiddenStripIR[],
   baseline: number,
   timeMin: number,
   timeMax: number,
   eventTimes: Float64Array,
 ): PackedTimeline {
   const n = topAllocsIR.length;
-  const totalStrips = stripsFlat.length / 4;
+  const detailStripCount = stripsFlat.length / 4;
+  const totalStrips = detailStripCount + hiddenStrips.length;
 
-  // Bucket strips by owning alloc so we can emit contiguous per-block
-  // ranges in the Float32 buffer.
-  const stripsPerAlloc: number[][] = new Array(n);
-  for (let i = 0; i < n; i++) stripsPerAlloc[i] = [];
-  for (let s = 0; s < totalStrips; s++) {
-    stripsPerAlloc[stripsFlat[s * 4] as number].push(s);
+  // Bucket strips by owning alloc with typed arrays. The previous
+  // number[][] form created one JS array per allocation and pushed every
+  // strip through it; show-all snapshots spend most of that time in
+  // object allocation / GC rather than numeric work.
+  const stripCounts = new Uint32Array(n);
+  for (let s = 0; s < detailStripCount; s++) {
+    stripCounts[stripsFlat[s * 4] as number]++;
+  }
+  const stripOffsetsByAlloc = new Uint32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    stripOffsetsByAlloc[i + 1] = stripOffsetsByAlloc[i] + stripCounts[i];
+  }
+  const stripCursor = new Uint32Array(stripOffsetsByAlloc);
+  const stripOrder = new Uint32Array(detailStripCount);
+  for (let s = 0; s < detailStripCount; s++) {
+    const li = stripsFlat[s * 4] as number;
+    stripOrder[stripCursor[li]++] = s;
   }
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
-  const timelineAllocs: TimelineAlloc[] = new Array(n);
+  const timelineAllocs: TimelineAlloc[] = new Array(n + hiddenStrips.length);
   const allocColors = new Float32Array(n * 3);
   // maxBytes starts at baseline since in-window strips get shifted up
   // by that much (the Y axis reflects absolute GPU bytes).
@@ -210,7 +305,9 @@ function packStrips(
     allocColors[i * 3 + 2] = bl;
     const sz = a.size;
     const startStripIdx = writeIdx;
-    for (const s of stripsPerAlloc[i]) {
+    const pEnd = stripOffsetsByAlloc[i + 1];
+    for (let p = stripOffsetsByAlloc[i]; p < pEnd; p++) {
+      const s = stripOrder[p];
       const tStart = stripsFlat[s * 4 + 1];
       const tEnd = stripsFlat[s * 4 + 2];
       const yOff = stripsFlat[s * 4 + 3];
@@ -239,8 +336,41 @@ function packStrips(
       stack_idx: a.stack_idx,
       idx: i,
       stripOffset: startStripIdx,
-      stripCount: stripsPerAlloc[i].length,
+      stripCount: stripCounts[i],
     };
+  }
+
+  const hiddenColor: [number, number, number] = [0.42, 0.44, 0.47];
+  for (let i = 0; i < hiddenStrips.length; i++) {
+    const h = hiddenStrips[i];
+    const allocIdx = n + i;
+    const off = writeIdx * STRIP_FLOATS;
+    stripBuffer[off] = h.tStart - timeMin;
+    stripBuffer[off + 1] = h.tEnd - timeMin;
+    stripBuffer[off + 2] = h.yOffset + baseline;
+    stripBuffer[off + 3] = h.size;
+    stripBuffer[off + 4] = hiddenColor[0];
+    stripBuffer[off + 5] = hiddenColor[1];
+    stripBuffer[off + 6] = hiddenColor[2];
+    const top = h.yOffset + baseline + h.size;
+    if (top > maxBytesFull) maxBytesFull = top;
+    timelineAllocs[allocIdx] = {
+      addr: -(i + 1),
+      size: h.size,
+      alloc_us: h.tStart,
+      free_requested_us: -1,
+      free_us: h.tEnd,
+      alive: false,
+      top_frame_idx: -1,
+      stack_idx: -1,
+      idx: allocIdx,
+      stripOffset: writeIdx,
+      stripCount: 1,
+      isHidden: true,
+      hiddenCount: h.count,
+      hiddenReason: "More allocation details exist than the current display budget can expand.",
+    };
+    writeIdx++;
   }
 
   // Event-axis buffer: same geometry as stripBuffer but with t_start /
@@ -442,6 +572,9 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
   const topAllocsIR = layoutLimit > 0
     ? allAllocsIR.slice(0, layoutLimit)
     : allAllocsIR;
+  const hiddenAllocsIR = layoutLimit > 0
+    ? allAllocsIR.slice(layoutLimit)
+    : [];
 
   // ---- Segments ----
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
@@ -490,7 +623,8 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
 
   // ---- Layout → strip packing → segment rows → flame graph ----
   const stripsFlat = buildLayout(topAllocsIR, timeMax);
-  const packed = packStrips(topAllocsIR, stripsFlat, baseline, timeMin, timeMax, eventTimes);
+  const hiddenStrips = buildHiddenStrips(topAllocsIR, hiddenAllocsIR, timeMin, timeMax);
+  const packed = packStrips(topAllocsIR, stripsFlat, hiddenStrips, baseline, timeMin, timeMax, eventTimes);
   const segmentRows = buildSegmentRows(segments, topAllocsIR, packed.timelineAllocs, packed.allocColors);
   const flame = buildFlameGraph(topAllocsIR, stackPool, framePool, timeMax);
   const topAllocations = extractTopAllocations(topAllocsIR, timeMax);
@@ -507,6 +641,9 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
       time_axis: timeAxis,
       peak_bytes: raw.timeline.peak_bytes,
       allocation_count: raw.timeline.allocation_count,
+      rendered_allocation_count: topAllocsIR.length,
+      hidden_allocation_count: hiddenAllocsIR.length,
+      hidden_strip_count: hiddenStrips.length,
       baseline,
     },
     timelineAllocs: packed.timelineAllocs,

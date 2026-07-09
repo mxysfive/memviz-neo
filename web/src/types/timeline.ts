@@ -9,6 +9,9 @@ export interface TimelineData {
   time_axis: TimelineTimeAxis;
   peak_bytes: number;
   allocation_count: number;
+  rendered_allocation_count: number;
+  hidden_allocation_count: number;
+  hidden_strip_count: number;
   /**
    * Bytes alive before the trace window began but not freed inside it —
    * pre-window persistent memory (weights, optimizer state) that we can
@@ -58,6 +61,10 @@ export interface TimelineAlloc {
   idx: number;
   stripOffset: number;
   stripCount: number;
+  /** Synthetic aggregate for allocations hidden by the current detail budget. */
+  isHidden?: boolean;
+  hiddenCount?: number;
+  hiddenReason?: string;
 }
 
 export const STRIP_FLOATS = 7;

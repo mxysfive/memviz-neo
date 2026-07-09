@@ -31,10 +31,10 @@ const workerCountPref = persistentNumber(
   (n) => n >= 1 && n <= WORKER_COUNT_MAX,
 );
 
-// layout_limit passed to WASM parse_intern. 0 = keep all allocations.
-// Small values (3k) drop mid-sized transient allocations and flatten
-// the optimizer-step saw-tooth pattern; 20k usually covers full FSDP
-// iterations; 0 is exact at the cost of more strips.
+// Number of allocation events laid out and rendered per rank. The
+// parser keeps all allocation records; changing this value replays the
+// current rank from the cached IR without reading the pickle again.
+// 0 = display all allocations.
 export const LAYOUT_LIMIT_OPTIONS: { value: number; label: string }[] = [
   { value: 3000, label: "3k" },
   { value: 10000, label: "10k" },
@@ -47,6 +47,10 @@ const layoutLimitPref = persistentNumber(
   20000,
   (n) => n >= 0,
 );
+
+export function getLayoutLimit(): number {
+  return useFileStore.getState().layoutLimit;
+}
 
 interface FileState {
   status: "idle" | "loading" | "ready" | "error";
@@ -231,8 +235,7 @@ async function loadAllParallel(
   );
   activePool = pool;
 
-  const layoutLimit = useFileStore.getState().layoutLimit;
-  await pool.processAll(tasks, { layoutLimit });
+  await pool.processAll(tasks);
 
   if (!firstDone) {
     set({ status: "error", error: "All ranks failed to parse", progress: 1 });

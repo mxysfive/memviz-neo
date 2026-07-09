@@ -2,7 +2,7 @@
  * Layout worker (pool, N workers). Accepts IR JSON from the parse
  * worker and produces the summary for the main thread during load.
  * The IR string itself is what the worker holds on to, not the fully
- * decoded RankData — at layout_limit=20k+ each RankData costs ~50 MB
+ * decoded RankData — at ~20k+ displayed allocations each RankData costs ~50 MB
  * JS heap and 128 ranks of that pushes the worker above 6 GB.
  *
  * When main requests a full rank, we re-run parseRank from the cached
@@ -51,14 +51,14 @@ self.onmessage = (e: MessageEvent) => {
   }
 
   if (type === "requestFull") {
-    const { rank, requestId } = e.data;
+    const { rank, requestId, layoutLimit } = e.data;
     const ir = irStore.get(rank);
     if (!ir) {
       (self as any).postMessage({ type: "fullMiss", rank, requestId });
       return;
     }
     try {
-      const { data } = parseRank(ir, rank);
+      const { data } = parseRank(ir, rank, { layoutLimit });
       (self as any).postMessage({ type: "full", rank, requestId, data });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });

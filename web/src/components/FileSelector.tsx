@@ -105,7 +105,7 @@ export default function FileSelector() {
             ))}
           </div>
           <span className="fs-config-hint mono faint">
-            top-N allocations kept per rank
+            allocation events displayed per rank
           </span>
         </div>
 

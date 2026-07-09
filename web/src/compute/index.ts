@@ -17,7 +17,7 @@ export interface Allocation {
 }
 
 /** One segment row worth of data for the SegmentTimeline view.
- *  Allocs are the subset of top-N allocations whose addr lives inside this
+ *  Allocs are the currently-rendered subset whose addr lives inside this
  *  segment's [address, address+totalSize) range. */
 export interface SegmentAlloc {
   addr: number;
@@ -100,7 +100,7 @@ export interface RankData {
   // come from stackPool[allocation.stack_idx].map(i => framePool[i]).
   framePool: FrameRecord[];
   stackPool: Uint32Array[];
-  /** Map "addr-alloc_us" → stack for top-rendered allocations (used by
+  /** Map "addr-alloc_us" → stack for currently-rendered allocations (used by
    *  getDetail). Key is a string tuple because PyTorch reuses GPU
    *  addresses, so `addr` alone can't uniquely identify an alloc. */
   stackByIdentity: Map<string, { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }>;

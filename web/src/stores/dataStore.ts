@@ -11,7 +11,7 @@ import type {
   AllocationDetail,
 } from "../types/timeline";
 import type { RankData, Anomaly, SegmentRow, TraceEvent, FlameData } from "../compute";
-import { getActivePool } from "./fileStore";
+import { getActivePool, getLayoutLimit } from "./fileStore";
 import { formatTopFrame } from "../utils";
 
 // Main-thread "current rank" store. We hold the full RankData only for
@@ -65,7 +65,7 @@ interface DataState {
   /** Underlying RankData for the current rank (needed for getDetail). */
   _currentData: RankData | null;
 
-  setCurrentRank: (rank: number) => Promise<void>;
+  setCurrentRank: (rank: number, opts?: { force?: boolean }) => Promise<void>;
   getDetail: (rank: number, addr: number, alloc_us: number) => AllocationDetail | null;
   focusAnomaly: (anomaly: Anomaly) => void;
   clearFocus: () => void;
@@ -105,8 +105,8 @@ function applyRankData(data: RankData | null, rank: number): Partial<DataState> 
   };
 }
 
-// De-dupe concurrent setCurrentRank calls for the same rank.
-let inflight: { rank: number; promise: Promise<void> } | null = null;
+// De-dupe concurrent setCurrentRank calls for the same rank + render limit.
+let inflight: { rank: number; layoutLimit: number; promise: Promise<void> } | null = null;
 
 export const useDataStore = create<DataState>((set, get) => ({
   currentRank: 0,
@@ -139,10 +139,11 @@ export const useDataStore = create<DataState>((set, get) => ({
   setSelectedAlloc: (a) => set({ selectedAlloc: a }),
   _currentData: null,
 
-  setCurrentRank: async (rank: number) => {
+  setCurrentRank: async (rank: number, opts?: { force?: boolean }) => {
     const current = get();
-    if (current.currentRank === rank && current._currentData !== null) return;
-    if (inflight && inflight.rank === rank) return inflight.promise;
+    if (!opts?.force && current.currentRank === rank && current._currentData !== null) return;
+    const layoutLimit = getLayoutLimit();
+    if (inflight && inflight.rank === rank && inflight.layoutLimit === layoutLimit) return inflight.promise;
 
     const pool = getActivePool();
     if (!pool) return;
@@ -151,16 +152,16 @@ export const useDataStore = create<DataState>((set, get) => ({
 
     const promise = (async () => {
       try {
-        const data = await pool.requestFull(rank);
+        const data = await pool.requestFull(rank, { layoutLimit });
         set(applyRankData(data, rank));
       } catch (err: any) {
         set({ switching: false, error: String(err) });
       } finally {
-        if (inflight && inflight.rank === rank) inflight = null;
+        if (inflight && inflight.rank === rank && inflight.layoutLimit === layoutLimit) inflight = null;
       }
     })();
 
-    inflight = { rank, promise };
+    inflight = { rank, layoutLimit, promise };
     return promise;
   },
 

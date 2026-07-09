@@ -12,7 +12,7 @@ import SegmentTimeline from "./views/SegmentTimeline";
 import AllocatorStateHistory from "./views/AllocatorStateHistory";
 import { ShortcutsHint, TimelineDetailPanel } from "./views/TimelineDetail";
 import { useDataStore } from "./stores/dataStore";
-import { useFileStore } from "./stores/fileStore";
+import { useFileStore, LAYOUT_LIMIT_OPTIONS } from "./stores/fileStore";
 import { useRankSummaries } from "./stores/rankStore";
 import { useContainerSize } from "./hooks/useContainerWidth";
 import { usePersistedNumber } from "./hooks/usePersistedNumber";
@@ -78,8 +78,11 @@ function Dashboard() {
   const traceEvents = useDataStore((s) => s.traceEvents);
   const currentRank = useDataStore((s) => s.currentRank);
   const error = useDataStore((s) => s.error);
+  const switching = useDataStore((s) => s.switching);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
   const selectedAlloc = useDataStore((s) => s.selectedAlloc);
+  const layoutLimit = useFileStore((s) => s.layoutLimit);
+  const setLayoutLimit = useFileStore((s) => s.setLayoutLimit);
   // Stable key the tray watches to auto-expand on selection. (addr,
   // alloc_us) identifies a unique alloc — picking a new one re-fires.
   const trayTrigger = selectedAlloc
@@ -89,6 +92,14 @@ function Dashboard() {
   const selectRank = useCallback(
     (r: number) => { void setCurrentRank(r); },
     [setCurrentRank],
+  );
+  const changeLayoutLimit = useCallback(
+    (n: number) => {
+      if (n === layoutLimit) return;
+      setLayoutLimit(n);
+      void setCurrentRank(currentRank, { force: true });
+    },
+    [layoutLimit, setLayoutLimit, setCurrentRank, currentRank],
   );
 
   // Box model: box contentH = Phase + Divider + Segment slot + chrome.
@@ -250,7 +261,23 @@ function Dashboard() {
                 <span className="hl">{rankTag}</span>
                 {mainView === "timeline" ? (
                   <>
-                    <span className="faint"> · {timelineAllocs.length} allocs</span>
+                    <span className="faint">
+                      · {timelineAllocs.length.toLocaleString()}
+                      {timeline ? `/${timeline.allocation_count.toLocaleString()}` : ""}
+                      {" "}allocs
+                    </span>
+                    <span className="track-limit" role="group" aria-label="Timeline allocation event count">
+                      {LAYOUT_LIMIT_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          className={layoutLimit === opt.value ? "is-active" : ""}
+                          disabled={switching}
+                          onClick={() => changeLayoutLimit(opt.value)}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </span>
                     {segmentRows.length > 0 && (
                       <span className="faint"> · {segmentRows.length} segments</span>
                     )}

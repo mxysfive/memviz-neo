@@ -423,7 +423,7 @@ pub fn parse_pickle_only(data: &[u8]) -> u32 {
 /// worker so the N-layout-worker WASM footprint is zero (JS heap is GC'd,
 /// unlike WASM linear memory which is grow-only).
 #[wasm_bindgen]
-pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
+pub fn parse_intern(data: &[u8], rank: i32, _layout_limit: i32) -> String {
     let mut pools = Pools::new();
     let (segments, traces, meta, uses_event_ord) = parse_snapshot(data, &mut pools);
 
@@ -436,18 +436,15 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let (allocs, t_min, t_max, peak, baseline) =
         build_allocations(&traces, seg_active, &pools);
 
-    // Pick top-N by size. Tie-break on alloc_us then addr to keep output
-    // deterministic when multiple allocations share a size.
-    // layout_limit <= 0 means keep all.
+    // Sort allocations by size. The UI/layout worker chooses how many
+    // of these to render, so "show more/all events" can be handled
+    // without reparsing the pickle bytes.
     let mut top_idx: Vec<usize> = (0..allocs.len()).collect();
     top_idx.sort_by(|&a, &b| {
         allocs[b].size.cmp(&allocs[a].size)
             .then_with(|| allocs[a].alloc_us.cmp(&allocs[b].alloc_us))
             .then_with(|| allocs[a].addr.cmp(&allocs[b].addr))
     });
-    if layout_limit > 0 {
-        top_idx.truncate(layout_limit as usize);
-    }
 
     let mut j = String::with_capacity(2 * 1024 * 1024);
     j.push('{');
@@ -522,7 +519,7 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Top-N allocations: layout-worker input. Each entry carries the
+    // Size-sorted allocations: layout-worker input. Each entry carries the
     // minimum scalars needed for polygon layout, strip packing, anomaly
     // detection, and detail panel resolution (via stack_idx -> stack_pool).
     j.push_str("\"top_allocations\":[");

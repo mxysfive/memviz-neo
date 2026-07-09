@@ -168,6 +168,36 @@ button { font-family: inherit; }
   flex: 0 0 auto;
 }
 .track-head-right { font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: var(--s3); }
+.track-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  background: rgba(10,10,11,0.5);
+}
+.track-limit button {
+  appearance: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-faint);
+  padding: 1px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.track-limit button:first-child { border-left: 0; }
+.track-limit button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-elev);
+}
+.track-limit button.is-active {
+  color: #0a0a0b;
+  background: var(--accent);
+}
+.track-limit button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
 .main-view-tabs {
   display: inline-flex;
   gap: 2px;

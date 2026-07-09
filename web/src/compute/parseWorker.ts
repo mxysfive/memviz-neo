@@ -4,8 +4,9 @@
  * an IR JSON string that a layout worker post-processes.
  *
  * Main → Worker: { type: "init", wasmModule }
- * Main → Worker: { type: "parse", rank, buffer, layoutLimit }
- *                 // buffer transferred; layoutLimit<=0 means no limit
+ * Main → Worker: { type: "parse", rank, buffer }
+ *                 // buffer transferred; display limits are applied later
+ *                 // by the layout worker so "show more" avoids reparsing.
  * Worker → Main: { type: "ready" }
  * Worker → Main: { type: "ir", rank, ir }
  * Worker → Main: { type: "error", rank, error }
@@ -32,12 +33,11 @@ self.onmessage = (e: MessageEvent) => {
   }
 
   if (type === "parse") {
-    const { rank, buffer, layoutLimit } = e.data;
+    const { rank, buffer } = e.data;
     try {
       if (!ready || !wasmModule) throw new Error("WASM not initialized");
       const t0 = performance.now();
-      const limit = typeof layoutLimit === "number" ? layoutLimit : 3000;
-      const ir = parse_intern(new Uint8Array(buffer), rank, limit);
+      const ir = parse_intern(new Uint8Array(buffer), rank, 0);
       const wasmMs = performance.now() - t0;
       (self as any).postMessage({ type: "ir", rank, ir, wasmMs, irBytes: ir.length });
       initSync({ module: wasmModule });

@@ -1,5 +1,5 @@
 // Layout-worker entry: takes the Rust-emitted IR JSON (frames/stack
-// pools, segments, top-N allocations) and produces the final RankData
+// pools, segments, allocation records) and produces the final RankData
 // the main thread renders. Polygon layout runs here in pure JS so the
 // N layout workers never touch WASM — their JS heap is GC'd, unlike
 // WASM linear memory which is grow-only.
@@ -46,7 +46,12 @@ interface PackedTimeline {
   stripCount: number;
 }
 
-// Port of the Rust build_layout (removed from WASM). O(N²) over top-N.
+interface ParseRankOptions {
+  layoutLimit?: number;
+}
+
+// Port of the Rust build_layout (removed from WASM). O(N²) over the
+// currently-rendered allocation subset.
 // Output: flat array of [li, t_start, t_end, y_offset] quadruples.
 function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
   const n = allocs.length;
@@ -167,6 +172,7 @@ function packStrips(
   baseline: number,
   timeMin: number,
   timeMax: number,
+  eventTimes: Float64Array,
 ): PackedTimeline {
   const n = topAllocsIR.length;
   const totalStrips = stripsFlat.length / 4;
@@ -178,18 +184,6 @@ function packStrips(
   for (let s = 0; s < totalStrips; s++) {
     stripsPerAlloc[stripsFlat[s * 4] as number].push(s);
   }
-
-  // Sorted unique event timestamps (relative to timeMin). Each alloc
-  // / free marks one event; live-at-end strips close at timeMax. Powers
-  // the "event" X-axis mode by compressing idle gaps.
-  const eventSet = new Set<number>();
-  eventSet.add(0);
-  eventSet.add(timeMax - timeMin);
-  for (const a of topAllocsIR) {
-    eventSet.add(a.alloc_us - timeMin);
-    if (a.free_us >= 0) eventSet.add(a.free_us - timeMin);
-  }
-  const eventTimes = Float64Array.from([...eventSet].sort((a, b) => a - b));
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
   const timelineAllocs: TimelineAlloc[] = new Array(n);
@@ -275,7 +269,7 @@ function packStrips(
 }
 
 /**
- * Bucket every top-N alloc into the segment whose [address, address+size)
+ * Bucket every rendered alloc into the segment whose [address, address+size)
  * range contains it. Empty segments still appear as rows so the
  * allocator layout stays visible even before allocs arrive.
  */
@@ -411,7 +405,7 @@ function extractTopAllocations(
   return out;
 }
 
-export function parseRank(irJson: string, _rank: number): ParseResult {
+export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions = {}): ParseResult {
   const raw = JSON.parse(irJson);
   const summary: RankSummary = raw.summary;
 
@@ -421,7 +415,6 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const rawStackPool: number[][] = raw.stack_pool || [];
   const stackPool: Uint32Array[] = rawStackPool.map((arr) => Uint32Array.from(arr));
 
-  const topAllocsIR: TopAllocIR[] = raw.top_allocations || [];
   const traceEvents: TraceEvent[] = (raw.trace_events || []).map((e: any) => ({
     action: String(e.action || ""),
     addr: Number(e.addr || 0),
@@ -438,6 +431,17 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   // per-alloc. Drawn as an opaque band at the bottom so the y axis
   // reflects real memory usage instead of "delta from window start".
   const baseline: number = raw.timeline.baseline || 0;
+  const eventSet = new Set<number>();
+  eventSet.add(0);
+  eventSet.add(timeMax - timeMin);
+  for (const e of traceEvents) eventSet.add(e.time_us - timeMin);
+  const eventTimes = Float64Array.from([...eventSet].sort((a, b) => a - b));
+
+  const allAllocsIR: TopAllocIR[] = raw.top_allocations || [];
+  const layoutLimit = Math.max(0, Math.floor(opts.layoutLimit ?? 20000));
+  const topAllocsIR = layoutLimit > 0
+    ? allAllocsIR.slice(0, layoutLimit)
+    : allAllocsIR;
 
   // ---- Segments ----
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
@@ -456,7 +460,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   }));
   segments.sort((a, b) => b.total_size - a.total_size);
 
-  // ---- Anomaly detection over the top-N (same cohort the UI surfaces) ----
+  // ---- Anomaly detection over the currently-rendered cohort ----
   const allocations: Allocation[] = topAllocsIR.map((a) => ({
     addr: a.addr,
     size: a.size,
@@ -486,7 +490,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
 
   // ---- Layout → strip packing → segment rows → flame graph ----
   const stripsFlat = buildLayout(topAllocsIR, timeMax);
-  const packed = packStrips(topAllocsIR, stripsFlat, baseline, timeMin, timeMax);
+  const packed = packStrips(topAllocsIR, stripsFlat, baseline, timeMin, timeMax, eventTimes);
   const segmentRows = buildSegmentRows(segments, topAllocsIR, packed.timelineAllocs, packed.allocColors);
   const flame = buildFlameGraph(topAllocsIR, stackPool, framePool, timeMax);
   const topAllocations = extractTopAllocations(topAllocsIR, timeMax);

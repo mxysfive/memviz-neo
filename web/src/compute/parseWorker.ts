@@ -1,7 +1,7 @@
 /**
- * Parse worker (serial, singleton). Runs WASM parse_intern — the
+ * Parse worker (serial, singleton). Runs WASM parse_intern_binary — the
  * expensive pickle decode + frame intern + alloc pairing stage. Emits
- * an IR JSON string that a layout worker post-processes.
+ * a compact IR that a layout worker post-processes.
  *
  * Main → Worker: { type: "init", wasmModule }
  * Main → Worker: { type: "parse", rank, file | buffer }
@@ -16,7 +16,8 @@
  * Worker → Main: { type: "error", rank, error }
  */
 
-import { initSync, parse_intern } from "../../../wasm/pkg/memviz_wasm.js";
+import { initSync, parse_intern_binary } from "../../../wasm/pkg/memviz_wasm.js";
+import { estimateIRBytes, irTransferables } from "./rankIr";
 
 let wasmModule: WebAssembly.Module | null = null;
 let ready = false;
@@ -72,9 +73,12 @@ self.onmessage = async (e: MessageEvent) => {
       if (!buffer && file) buffer = await readFileWithProgress(file, rank);
       if (!buffer) throw new Error("No snapshot buffer");
       const t0 = performance.now();
-      const ir = parse_intern(new Uint8Array(buffer), rank, 0);
+      const ir = parse_intern_binary(new Uint8Array(buffer), rank);
       const wasmMs = performance.now() - t0;
-      (self as any).postMessage({ type: "ir", rank, ir, wasmMs, irBytes: ir.length });
+      (self as any).postMessage(
+        { type: "ir", rank, ir, wasmMs, irBytes: estimateIRBytes(ir) },
+        irTransferables(ir),
+      );
       initSync({ module: wasmModule });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });

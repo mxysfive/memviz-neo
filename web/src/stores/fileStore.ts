@@ -26,6 +26,26 @@ export function getActivePool(): WorkerPool | null {
   return activePool;
 }
 
+export async function dumpRankIR(rank: number, allocationLimit: number | null = 1000): Promise<unknown> {
+  if (!activePool) throw new Error("No active snapshot pool");
+  return activePool.requestDebugDump(rank, { allocationLimit });
+}
+
+export async function dumpRankIRText(rank: number, allocationLimit: number | null = 1000): Promise<string> {
+  return JSON.stringify(await dumpRankIR(rank, allocationLimit), null, 2);
+}
+
+export async function downloadRankIRDump(rank: number, allocationLimit: number | null = 1000): Promise<void> {
+  const text = await dumpRankIRText(rank, allocationLimit);
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `memviz-rank${rank}-ir-dump.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 import { persistentNumber } from "../utils";
 
 const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
@@ -186,6 +206,12 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
     const set = (partial: Partial<FileState>) => useFileStore.setState(partial);
     await loadAllParallel(entries, set);
   };
+}
+
+if (typeof window !== "undefined") {
+  (window as any).__memvizDumpRank = dumpRankIR;
+  (window as any).__memvizDumpRankText = dumpRankIRText;
+  (window as any).__memvizDownloadRankDump = downloadRankIRDump;
 }
 
 async function loadAllParallel(

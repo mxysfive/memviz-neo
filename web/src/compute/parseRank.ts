@@ -17,20 +17,17 @@ import type { Allocation, RankData, SegmentRow, SegmentAlloc, TraceEvent, FlameD
 import { blockColor } from "./palette";
 import { eventIdxAt } from "./eventTimes";
 import { isInternalFrame } from "../utils";
+import {
+  binaryAllocationCount,
+  binaryTopAllocations,
+  isBinaryRankIR,
+  type BinaryRankIR,
+  type RankIR,
+  type TopAllocIR,
+} from "./rankIr";
 
 export interface ParseResult {
   data: RankData;
-}
-
-interface TopAllocIR {
-  idx: number;
-  addr: number;
-  size: number;
-  alloc_us: number;
-  free_requested_us: number;
-  free_us: number; // -1 if alive
-  top_frame_idx: number;
-  stack_idx: number;
 }
 
 /** Output of `packStrips` — downstream stages (segment rows, RankData
@@ -202,6 +199,78 @@ function buildHiddenStrips(
 
   for (const a of detailAllocs) addAllocEvents(a, false);
   for (const a of hiddenAllocs) addAllocEvents(a, true);
+  if (events.length === 0) return [];
+
+  events.sort((a, b) => a.time - b.time);
+  const out: HiddenStripIR[] = [];
+  let detailLive = 0;
+  let hiddenLive = 0;
+  let hiddenCount = 0;
+  let i = 0;
+  while (i < events.length) {
+    const t = events[i].time;
+    while (i < events.length && events[i].time === t) {
+      detailLive += events[i].detailDelta;
+      hiddenLive += events[i].hiddenDelta;
+      hiddenCount += events[i].hiddenCountDelta;
+      i++;
+    }
+    const next = i < events.length ? events[i].time : timeMax;
+    if (next <= t || hiddenLive <= 0 || hiddenCount <= 0) continue;
+    const yOffset = Math.max(0, detailLive);
+    const size = Math.max(0, hiddenLive);
+    const count = Math.max(1, hiddenCount);
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      prev.tEnd === t &&
+      prev.yOffset === yOffset &&
+      prev.size === size &&
+      prev.count === count
+    ) {
+      prev.tEnd = next;
+    } else {
+      out.push({ tStart: t, tEnd: next, yOffset, size, count });
+    }
+  }
+  return out;
+}
+
+function buildHiddenStripsFromBinary(
+  detailAllocs: TopAllocIR[],
+  ir: BinaryRankIR,
+  hiddenStart: number,
+  timeMin: number,
+  timeMax: number,
+): HiddenStripIR[] {
+  const total = binaryAllocationCount(ir);
+  if (hiddenStart >= total) return [];
+
+  type Ev = {
+    time: number;
+    detailDelta: number;
+    hiddenDelta: number;
+    hiddenCountDelta: number;
+  };
+  const events: Ev[] = [];
+  const add = (allocUs: number, freeUs: number, size: number, hidden: boolean) => {
+    const endRaw = freeUs === -1 ? timeMax : freeUs;
+    const start = Math.max(timeMin, Math.min(timeMax, allocUs));
+    const end = Math.max(timeMin, Math.min(timeMax, endRaw));
+    if (start >= end) return;
+    if (hidden) {
+      events.push({ time: start, detailDelta: 0, hiddenDelta: size, hiddenCountDelta: 1 });
+      events.push({ time: end, detailDelta: 0, hiddenDelta: -size, hiddenCountDelta: -1 });
+    } else {
+      events.push({ time: start, detailDelta: size, hiddenDelta: 0, hiddenCountDelta: 0 });
+      events.push({ time: end, detailDelta: -size, hiddenDelta: 0, hiddenCountDelta: 0 });
+    }
+  };
+
+  for (const a of detailAllocs) add(a.alloc_us, a.free_us, a.size, false);
+  for (let i = hiddenStart; i < total; i++) {
+    add(ir.allocAllocUs[i], ir.allocFreeUs[i], ir.allocSize[i], true);
+  }
   if (events.length === 0) return [];
 
   events.sort((a, b) => a.time - b.time);
@@ -535,8 +604,9 @@ function extractTopAllocations(
   return out;
 }
 
-export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions = {}): ParseResult {
-  const raw = JSON.parse(irJson);
+export function parseRank(ir: RankIR, _rank: number, opts: ParseRankOptions = {}): ParseResult {
+  const binaryIR = isBinaryRankIR(ir) ? ir : null;
+  const raw = JSON.parse(binaryIR ? binaryIR.metaJson : (ir as string));
   const summary: RankSummary = raw.summary;
 
   // ---- Pools + raw inputs ----
@@ -567,14 +637,23 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
   for (const e of traceEvents) eventSet.add(e.time_us - timeMin);
   const eventTimes = Float64Array.from([...eventSet].sort((a, b) => a - b));
 
-  const allAllocsIR: TopAllocIR[] = raw.top_allocations || [];
   const layoutLimit = Math.max(0, Math.floor(opts.layoutLimit ?? 20000));
-  const topAllocsIR = layoutLimit > 0
-    ? allAllocsIR.slice(0, layoutLimit)
-    : allAllocsIR;
-  const hiddenAllocsIR = layoutLimit > 0
-    ? allAllocsIR.slice(layoutLimit)
+  const jsonTopAllocations: TopAllocIR[] = raw.top_allocations || [];
+  const totalAllocations = binaryIR
+    ? binaryAllocationCount(binaryIR)
+    : jsonTopAllocations.length;
+  const renderedAllocationCount = layoutLimit > 0
+    ? Math.min(layoutLimit, totalAllocations)
+    : totalAllocations;
+  const topAllocsIR = binaryIR
+    ? binaryTopAllocations(binaryIR, 0, renderedAllocationCount)
+    : (layoutLimit > 0
+        ? jsonTopAllocations.slice(0, layoutLimit)
+        : jsonTopAllocations);
+  const hiddenAllocsIR = !binaryIR && layoutLimit > 0
+    ? jsonTopAllocations.slice(layoutLimit)
     : [];
+  const hiddenAllocationCount = Math.max(0, totalAllocations - topAllocsIR.length);
 
   // ---- Segments ----
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
@@ -623,7 +702,9 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
 
   // ---- Layout → strip packing → segment rows → flame graph ----
   const stripsFlat = buildLayout(topAllocsIR, timeMax);
-  const hiddenStrips = buildHiddenStrips(topAllocsIR, hiddenAllocsIR, timeMin, timeMax);
+  const hiddenStrips = binaryIR && layoutLimit > 0
+    ? buildHiddenStripsFromBinary(topAllocsIR, binaryIR, renderedAllocationCount, timeMin, timeMax)
+    : buildHiddenStrips(topAllocsIR, hiddenAllocsIR, timeMin, timeMax);
   const packed = packStrips(topAllocsIR, stripsFlat, hiddenStrips, baseline, timeMin, timeMax, eventTimes);
   const segmentRows = buildSegmentRows(segments, topAllocsIR, packed.timelineAllocs, packed.allocColors);
   const flame = buildFlameGraph(topAllocsIR, stackPool, framePool, timeMax);
@@ -642,7 +723,7 @@ export function parseRank(irJson: string, _rank: number, opts: ParseRankOptions 
       peak_bytes: raw.timeline.peak_bytes,
       allocation_count: raw.timeline.allocation_count,
       rendered_allocation_count: topAllocsIR.length,
-      hidden_allocation_count: hiddenAllocsIR.length,
+      hidden_allocation_count: hiddenAllocationCount,
       hidden_strip_count: hiddenStrips.length,
       baseline,
     },

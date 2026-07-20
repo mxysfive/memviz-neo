@@ -16,6 +16,7 @@
 // @ts-ignore — Vite handles this URL pattern for WASM
 import wasmUrl from "../../../wasm/pkg/memviz_wasm_bg.wasm?url";
 import type { RankData } from "./index";
+import { irTransferables, type RankIR } from "./rankIr";
 
 export interface WorkerTask {
   rank: number;
@@ -63,11 +64,17 @@ export interface ProgressSnapshot {
 export interface WorkerPool {
   processAll: (tasks: WorkerTask[]) => Promise<void>;
   requestFull: (rank: number, opts?: { layoutLimit?: number }) => Promise<RankData>;
+  requestDebugDump: (rank: number, opts?: { allocationLimit?: number | null }) => Promise<unknown>;
   terminate: () => void;
 }
 
 interface PendingRequest {
   resolve: (data: RankData) => void;
+  reject: (err: Error) => void;
+}
+
+interface PendingDebugRequest {
+  resolve: (dump: unknown) => void;
   reject: (err: Error) => void;
 }
 
@@ -93,6 +100,7 @@ export function createWorkerPool(
   const rankOwner = new Map<number, Worker>();
   // Outstanding requestFull promises keyed by requestId.
   const pendingFullRequests = new Map<number, PendingRequest>();
+  const pendingDebugRequests = new Map<number, PendingDebugRequest>();
   let nextRequestId = 1;
 
   let terminated = false;
@@ -208,7 +216,7 @@ export function createWorkerPool(
 
     let completed = 0;
     let nextTaskIdx = 0;
-    const layoutQueue: { rank: number; ir: string }[] = [];
+    const layoutQueue: { rank: number; ir: RankIR; transfer: Transferable[] }[] = [];
     const idleParseWorkers: Worker[] = [...parseWorkers];
     const idleLayoutWorkers: Worker[] = [...layoutWorkers];
 
@@ -269,12 +277,12 @@ export function createWorkerPool(
       function dispatchLayoutIfPossible() {
         while (idleLayoutWorkers.length > 0 && layoutQueue.length > 0) {
           const worker = idleLayoutWorkers.shift()!;
-          const { rank, ir } = layoutQueue.shift()!;
+          const { rank, ir, transfer } = layoutQueue.shift()!;
           const wIdx = layoutWorkers.indexOf(worker);
           layoutBusyRank[wIdx] = rank;
           rankOwner.set(rank, worker);
           scheduleProgress(snap(completed, "parsing"));
-          worker.postMessage({ type: "layout", rank, ir });
+          worker.postMessage({ type: "layout", rank, ir }, transfer);
         }
       }
 
@@ -307,7 +315,7 @@ export function createWorkerPool(
               layoutMs: 0,
               totalMs: 0,
             });
-            layoutQueue.push({ rank, ir });
+            layoutQueue.push({ rank, ir, transfer: irTransferables(ir) });
             parseBusyRank[wIdx] = -1;
             parseBusyTaskIdx[wIdx] = -1;
             idleParseWorkers.push(worker);
@@ -334,7 +342,7 @@ export function createWorkerPool(
 
       for (const worker of layoutWorkers) {
         worker.onmessage = (e: MessageEvent) => timed(`layout:${e.data.type}`, () => {
-          const { type, rank, summary, error, layoutMs, requestId, data } = e.data;
+          const { type, rank, summary, error, layoutMs, requestId, data, dump } = e.data;
           const wIdx = layoutWorkers.indexOf(worker);
           if (type === "summary") {
             timed("onSummary", () => onSummary(rank, summary));
@@ -356,6 +364,12 @@ export function createWorkerPool(
           } else if (type === "fullMiss") {
             const p = pendingFullRequests.get(requestId);
             if (p) { pendingFullRequests.delete(requestId); p.reject(new Error(`rank ${rank} not held by worker`)); }
+          } else if (type === "debugDump") {
+            const p = pendingDebugRequests.get(requestId);
+            if (p) { pendingDebugRequests.delete(requestId); p.resolve(dump); }
+          } else if (type === "debugDumpMiss") {
+            const p = pendingDebugRequests.get(requestId);
+            if (p) { pendingDebugRequests.delete(requestId); p.reject(new Error(`rank ${rank} not held by worker`)); }
           } else if (type === "error") {
             onError(rank, error);
             completed++;
@@ -403,10 +417,27 @@ export function createWorkerPool(
     });
   }
 
+  function requestDebugDump(rank: number, opts?: { allocationLimit?: number | null }): Promise<unknown> {
+    const worker = rankOwner.get(rank);
+    if (!worker) return Promise.reject(new Error(`no worker owns rank ${rank}`));
+    const requestId = nextRequestId++;
+    return new Promise<unknown>((resolve, reject) => {
+      pendingDebugRequests.set(requestId, { resolve, reject });
+      worker.postMessage({
+        type: "debugDump",
+        rank,
+        requestId,
+        allocationLimit: opts?.allocationLimit,
+      });
+    });
+  }
+
   function terminate() {
     terminated = true;
     for (const p of pendingFullRequests.values()) p.reject(new Error("pool terminated"));
+    for (const p of pendingDebugRequests.values()) p.reject(new Error("pool terminated"));
     pendingFullRequests.clear();
+    pendingDebugRequests.clear();
     rankOwner.clear();
     for (const w of parseWorkers) w.terminate();
     for (const w of layoutWorkers) w.terminate();
@@ -414,5 +445,5 @@ export function createWorkerPool(
     layoutWorkers.length = 0;
   }
 
-  return { processAll, requestFull, terminate };
+  return { processAll, requestFull, requestDebugDump, terminate };
 }

@@ -1,7 +1,7 @@
 /**
- * Layout worker (pool, N workers). Accepts IR JSON from the parse
+ * Layout worker (pool, N workers). Accepts IR from the parse
  * worker and produces the summary for the main thread during load.
- * The IR string itself is what the worker holds on to, not the fully
+ * The IR itself is what the worker holds on to, not the fully
  * decoded RankData — at ~20k+ displayed allocations each RankData costs ~50 MB
  * JS heap and 128 ranks of that pushes the worker above 6 GB.
  *
@@ -17,12 +17,22 @@
  * Worker → Main: { type: "full", rank, requestId, data }
  *              | { type: "fullMiss", rank, requestId }
  *
+ * Main → Worker: { type: "debugDump", rank, requestId, allocationLimit }
+ * Worker → Main: { type: "debugDump", rank, requestId, dump }
+ *              | { type: "debugDumpMiss", rank, requestId }
+ *
  * Worker → Main: { type: "error", rank, error }
  */
 
 import { parseRank } from "./parseRank";
+import {
+  estimateIRBytes,
+  isBinaryRankIR,
+  rankIRToDebugJson,
+  type RankIR,
+} from "./rankIr";
 
-const irStore = new Map<number, string>();
+const irStore = new Map<number, RankIR>();
 
 function extractTopLevelObject(json: string, key: string): string {
   const keyToken = `"${key}":`;
@@ -61,12 +71,13 @@ self.onmessage = (e: MessageEvent) => {
   const { type } = e.data;
 
   if (type === "layout") {
-    const { rank, ir } = e.data as { rank: number; ir: string };
+    const { rank, ir } = e.data as { rank: number; ir: RankIR };
     try {
       // Only pull `summary` out of the IR during load — it's tiny and
       // is all the main thread needs to render the rank selector.
       const t0 = performance.now();
-      const summary = JSON.parse(extractTopLevelObject(ir, "summary"));
+      const metaJson = isBinaryRankIR(ir) ? ir.metaJson : ir;
+      const summary = JSON.parse(extractTopLevelObject(metaJson, "summary"));
       const layoutMs = performance.now() - t0;
       irStore.set(rank, ir);
       (self as any).postMessage({
@@ -74,7 +85,7 @@ self.onmessage = (e: MessageEvent) => {
         rank,
         summary,
         layoutMs,
-        irBytes: ir.length,
+        irBytes: estimateIRBytes(ir),
       });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });
@@ -92,6 +103,22 @@ self.onmessage = (e: MessageEvent) => {
     try {
       const { data } = parseRank(ir, rank, { layoutLimit });
       (self as any).postMessage({ type: "full", rank, requestId, data });
+    } catch (err: any) {
+      (self as any).postMessage({ type: "error", rank, error: String(err) });
+    }
+    return;
+  }
+
+  if (type === "debugDump") {
+    const { rank, requestId, allocationLimit } = e.data;
+    const ir = irStore.get(rank);
+    if (!ir) {
+      (self as any).postMessage({ type: "debugDumpMiss", rank, requestId });
+      return;
+    }
+    try {
+      const dump = rankIRToDebugJson(ir, { allocationLimit });
+      (self as any).postMessage({ type: "debugDump", rank, requestId, dump });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });
     }

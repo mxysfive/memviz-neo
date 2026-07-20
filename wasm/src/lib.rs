@@ -1,3 +1,4 @@
+use js_sys::{Float64Array, Int32Array, Object, Reflect};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -8,7 +9,11 @@ use pickle::{Value as RcValue, ValueRc};
 // ---- Data structures ----
 
 #[derive(Clone, Hash, Eq, PartialEq)]
-struct Frame { name: String, filename: String, line: i64 }
+struct Frame {
+    name: String,
+    filename: String,
+    line: i64,
+}
 
 /// Frame + stack intern pools.
 ///
@@ -34,14 +39,18 @@ impl Pools {
         }
     }
     fn intern_frame(&mut self, f: Frame) -> u32 {
-        if let Some(&idx) = self.frame_index.get(&f) { return idx; }
+        if let Some(&idx) = self.frame_index.get(&f) {
+            return idx;
+        }
         let idx = self.frame_pool.len() as u32;
         self.frame_index.insert(f.clone(), idx);
         self.frame_pool.push(f);
         idx
     }
     fn intern_stack(&mut self, frames: Vec<u32>) -> u32 {
-        if let Some(&idx) = self.stack_index.get(&frames) { return idx; }
+        if let Some(&idx) = self.stack_index.get(&frames) {
+            return idx;
+        }
         let idx = self.stack_pool.len() as u32;
         self.stack_index.insert(frames.clone(), idx);
         self.stack_pool.push(frames);
@@ -62,8 +71,13 @@ struct Allocation {
 }
 
 struct Segment {
-    address: i64, total_size: i64, allocated_size: i64, active_size: i64,
-    segment_type: String, stream: i64, blocks: Vec<Block>,
+    address: i64,
+    total_size: i64,
+    allocated_size: i64,
+    active_size: i64,
+    segment_type: String,
+    stream: i64,
+    blocks: Vec<Block>,
 }
 
 struct Block {
@@ -95,10 +109,14 @@ struct TraceRaw {
 type DictCell = std::cell::RefCell<Vec<(ValueRc, ValueRc)>>;
 
 fn rd_str(d: &DictCell, k: &str) -> String {
-    pickle::dict_get(d, k).map(|v| pickle::to_str_rc(&v).to_string()).unwrap_or_default()
+    pickle::dict_get(d, k)
+        .map(|v| pickle::to_str_rc(&v).to_string())
+        .unwrap_or_default()
 }
 fn rd_int(d: &DictCell, k: &str) -> i64 {
-    pickle::dict_get(d, k).map(|v| pickle::to_int(&v)).unwrap_or(0)
+    pickle::dict_get(d, k)
+        .map(|v| pickle::to_int(&v))
+        .unwrap_or(0)
 }
 
 fn intern_frames(d: &DictCell, pools: &mut Pools) -> u32 {
@@ -136,7 +154,12 @@ struct RootMeta {
 fn parse_snapshot(
     data: &[u8],
     pools: &mut Pools,
-) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32, i64)>, RootMeta, bool) {
+) -> (
+    Vec<Segment>,
+    Vec<(String, i64, i64, i64, i64, u32, i64)>,
+    RootMeta,
+    bool,
+) {
     let root = pickle::parse(data).expect("pickle parse failed");
     let root_dict = pickle::as_dict(&root).expect("root not a dict");
 
@@ -151,8 +174,11 @@ fn parse_snapshot(
                 meta.expandable_segments = matches!(v.as_ref(), RcValue::Bool(true));
             }
             if let Some(v) = pickle::dict_get(sd, "garbage_collection_threshold") {
-                if let RcValue::Float(f) = v.as_ref() { meta.gc_threshold = *f; }
-                else if let RcValue::Int(i) = v.as_ref() { meta.gc_threshold = *i as f64; }
+                if let RcValue::Float(f) = v.as_ref() {
+                    meta.gc_threshold = *f;
+                } else if let RcValue::Int(i) = v.as_ref() {
+                    meta.gc_threshold = *i as f64;
+                }
             }
         }
     }
@@ -160,13 +186,19 @@ fn parse_snapshot(
     let mut segments: Vec<Segment> = Vec::new();
     if let Some(segs_v) = pickle::dict_get(root_dict, "segments") {
         pickle::with_list_items(&segs_v, |sv| {
-            let sd = match pickle::as_dict(sv) { Some(d) => d, None => return };
+            let sd = match pickle::as_dict(sv) {
+                Some(d) => d,
+                None => return,
+            };
             let segment_addr = rd_int(sd, "address");
             let mut next_block_addr = segment_addr;
             let mut blocks: Vec<Block> = Vec::new();
             if let Some(bs_v) = pickle::dict_get(sd, "blocks") {
                 pickle::with_list_items(&bs_v, |bv| {
-                    let bd = match pickle::as_dict(bv) { Some(d) => d, None => return };
+                    let bd = match pickle::as_dict(bv) {
+                        Some(d) => d,
+                        None => return,
+                    };
                     let stack_idx = intern_frames(bd, pools);
                     let top_frame_idx = resolve_top_frame_from_stack(stack_idx, pools);
                     let size = rd_int(bd, "size");
@@ -207,10 +239,18 @@ fn parse_snapshot(
             let mut event_ord: i64 = 0;
             for (dev_idx_usize, dev) in outer_cell.borrow().iter().enumerate() {
                 let dev_idx = dev_idx_usize as i64;
-                let evs_cell = match pickle::as_list(dev) { Some(c) => c, None => continue };
+                let evs_cell = match pickle::as_list(dev) {
+                    Some(c) => c,
+                    None => continue,
+                };
                 for ev in evs_cell.borrow().iter() {
-                    let ed = match pickle::as_dict(ev) { Some(d) => d, None => continue };
-                    if pickle::dict_get(ed, "addr").is_none() { continue; }
+                    let ed = match pickle::as_dict(ev) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+                    if pickle::dict_get(ed, "addr").is_none() {
+                        continue;
+                    }
                     let addr = rd_int(ed, "addr");
                     let device_addr = (dev_idx << 48) | (addr & 0x0000_FFFF_FFFF_FFFF);
                     let stack_idx = intern_frames(ed, pools);
@@ -235,13 +275,18 @@ fn parse_snapshot(
     // torch_npu traces currently omit time_us entirely; preserve allocator
     // ordering by using event ordinal for every event in that snapshot.
     let uses_event_ord = raw_traces.iter().any(|t| !t.has_time);
-    let mut traces: Vec<(String, i64, i64, i64, i64, u32, i64)> = Vec::with_capacity(raw_traces.len());
+    let mut traces: Vec<(String, i64, i64, i64, i64, u32, i64)> =
+        Vec::with_capacity(raw_traces.len());
     for t in raw_traces {
         traces.push((
             t.action,
             t.device_addr,
             t.size,
-            if uses_event_ord { t.event_ord } else { t.time_us },
+            if uses_event_ord {
+                t.event_ord
+            } else {
+                t.time_us
+            },
             t.raw_addr,
             t.stack_idx,
             t.stream,
@@ -268,12 +313,18 @@ fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
     let stack = &pools.stack_pool[stack_idx as usize];
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if is_internal(f) { continue; }
-        if f.filename.contains(".py") { return fidx; }
+        if is_internal(f) {
+            continue;
+        }
+        if f.filename.contains(".py") {
+            return fidx;
+        }
     }
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if is_internal(f) { continue; }
+        if is_internal(f) {
+            continue;
+        }
         return fidx;
     }
     NO_FRAME
@@ -306,8 +357,16 @@ fn build_allocations(
     segments_active_allocated: i64,
     pools: &Pools,
 ) -> (Vec<Allocation>, i64, i64, i64, i64) {
-    if traces.is_empty() { return (vec![], 0, 0, 0, 0); }
-    struct P { raw_addr: i64, size: i64, time_us: i64, free_req: i64, stack_idx: u32 }
+    if traces.is_empty() {
+        return (vec![], 0, 0, 0, 0);
+    }
+    struct P {
+        raw_addr: i64,
+        size: i64,
+        time_us: i64,
+        free_req: i64,
+        stack_idx: u32,
+    }
     let mut pending: HashMap<i64, P> = HashMap::new();
     let mut allocs = Vec::new();
 
@@ -327,21 +386,37 @@ fn build_allocations(
     for (action, device_addr, size, time_us, raw_addr, stack_idx, _stream) in traces {
         match action.as_str() {
             "alloc" => {
-                pending.insert(*device_addr, P {
-                    raw_addr: *raw_addr, size: *size, time_us: *time_us,
-                    free_req: -1, stack_idx: *stack_idx,
-                });
+                pending.insert(
+                    *device_addr,
+                    P {
+                        raw_addr: *raw_addr,
+                        size: *size,
+                        time_us: *time_us,
+                        free_req: -1,
+                        stack_idx: *stack_idx,
+                    },
+                );
                 running += size;
-                if running > max_running { max_running = running; }
+                if running > max_running {
+                    max_running = running;
+                }
             }
-            "free_requested" => { if let Some(p) = pending.get_mut(device_addr) { p.free_req = *time_us; } }
+            "free_requested" => {
+                if let Some(p) = pending.get_mut(device_addr) {
+                    p.free_req = *time_us;
+                }
+            }
             "free_completed" => {
                 if let Some(p) = pending.remove(device_addr) {
                     let top = resolve_top_frame_from_stack(p.stack_idx, pools);
                     allocs.push(Allocation {
-                        addr: p.raw_addr, size: p.size, alloc_us: p.time_us,
-                        free_requested_us: p.free_req, free_us: *time_us,
-                        top_frame_idx: top, stack_idx: p.stack_idx,
+                        addr: p.raw_addr,
+                        size: p.size,
+                        alloc_us: p.time_us,
+                        free_requested_us: p.free_req,
+                        free_us: *time_us,
+                        top_frame_idx: top,
+                        stack_idx: p.stack_idx,
                     });
                     running -= p.size;
                 } else {
@@ -357,16 +432,26 @@ fn build_allocations(
     for (raw_addr, size, free_us, stack_idx) in orphans {
         let top = resolve_top_frame_from_stack(stack_idx, pools);
         allocs.push(Allocation {
-            addr: raw_addr, size, alloc_us: t_min, free_requested_us: -1,
-            free_us, top_frame_idx: top, stack_idx,
+            addr: raw_addr,
+            size,
+            alloc_us: t_min,
+            free_requested_us: -1,
+            free_us,
+            top_frame_idx: top,
+            stack_idx,
         });
     }
 
     for (_key, p) in pending.drain() {
         let top = resolve_top_frame_from_stack(p.stack_idx, pools);
         allocs.push(Allocation {
-            addr: p.raw_addr, size: p.size, alloc_us: p.time_us, free_requested_us: p.free_req,
-            free_us: -1, top_frame_idx: top, stack_idx: p.stack_idx,
+            addr: p.raw_addr,
+            size: p.size,
+            alloc_us: p.time_us,
+            free_requested_us: p.free_req,
+            free_us: -1,
+            top_frame_idx: top,
+            stack_idx: p.stack_idx,
         });
     }
 
@@ -386,18 +471,146 @@ fn json_str(s: &str) -> String {
     o.push('"');
     for c in s.chars() {
         match c {
-            '"' => o.push_str("\\\""), '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"), '\r' => o.push_str("\\r"),
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => { let _ = std::fmt::Write::write_fmt(&mut o, format_args!("\\u{:04x}", c as u32)); }
+            c if (c as u32) < 0x20 => {
+                let _ = std::fmt::Write::write_fmt(&mut o, format_args!("\\u{:04x}", c as u32));
+            }
             c => o.push(c),
         }
     }
-    o.push('"'); o
+    o.push('"');
+    o
 }
 
 fn emit_frame_idx(buf: &mut String, idx: u32) {
-    if idx == NO_FRAME { buf.push_str("-1"); } else { let _ = std::fmt::Write::write_fmt(buf, format_args!("{}", idx as i64)); }
+    if idx == NO_FRAME {
+        buf.push_str("-1");
+    } else {
+        let _ = std::fmt::Write::write_fmt(buf, format_args!("{}", idx as i64));
+    }
+}
+
+fn emit_meta_json(
+    j: &mut String,
+    rank: i32,
+    segments: &[Segment],
+    traces: &[(String, i64, i64, i64, i64, u32, i64)],
+    meta: &RootMeta,
+    uses_event_ord: bool,
+    pools: &Pools,
+    t_min: i64,
+    t_max: i64,
+    peak: i64,
+    baseline: i64,
+    alloc_count: usize,
+) {
+    // Summary
+    let (mut tr, mut ta, mut tac, mut sc, mut bc, mut ab, mut ib) =
+        (0i64, 0, 0, 0usize, 0usize, 0i64, 0i64);
+    for s in segments {
+        tr += s.total_size;
+        ta += s.allocated_size;
+        tac += s.active_size;
+        sc += 1;
+        for b in &s.blocks {
+            bc += 1;
+            if b.state == "active_allocated" {
+                ab += b.size;
+            } else if b.state == "inactive" {
+                ib += b.size;
+            }
+        }
+    }
+    j.push_str(&format!(
+        "\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib},\"baseline\":{baseline},\"peak_bytes\":{peak},\"alloc_conf\":{},\"expandable_segments\":{},\"max_split_size\":{},\"gc_threshold\":{}}},",
+        json_str(&meta.alloc_conf),
+        meta.expandable_segments,
+        meta.max_split_size,
+        meta.gc_threshold,
+    ));
+    let time_axis = if uses_event_ord {
+        "event_ordinal"
+    } else {
+        "time_us"
+    };
+    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"time_axis\":{},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", json_str(time_axis), alloc_count));
+
+    // Interned frame pool: [[name, filename, line], ...]
+    j.push_str("\"frame_pool\":[");
+    for (i, f) in pools.frame_pool.iter().enumerate() {
+        if i > 0 {
+            j.push(',');
+        }
+        j.push_str(&format!(
+            "[{},{},{}]",
+            json_str(&f.name),
+            json_str(&f.filename),
+            f.line
+        ));
+    }
+    j.push_str("],");
+
+    // Interned stack pool: [[frame_idx, ...], ...]
+    j.push_str("\"stack_pool\":[");
+    for (i, stk) in pools.stack_pool.iter().enumerate() {
+        if i > 0 {
+            j.push(',');
+        }
+        j.push('[');
+        for (k, &fidx) in stk.iter().enumerate() {
+            if k > 0 {
+                j.push(',');
+            }
+            let _ = std::fmt::Write::write_fmt(j, format_args!("{}", fidx));
+        }
+        j.push(']');
+    }
+    j.push_str("],");
+
+    // Segments for treemap / address map.
+    j.push_str("\"segments\":[");
+    for (si, s) in segments.iter().enumerate() {
+        if si > 0 {
+            j.push(',');
+        }
+        j.push_str(&format!("{{\"address\":{},\"total_size\":{},\"allocated_size\":{},\"segment_type\":{},\"stream\":{},\"blocks\":[",
+            s.address, s.total_size, s.allocated_size, json_str(&s.segment_type), s.stream));
+        for (bi, b) in s.blocks.iter().enumerate() {
+            if bi > 0 {
+                j.push(',');
+            }
+            j.push_str(&format!("{{\"address\":{},\"size\":{},\"state\":{},\"offset_in_segment\":{},\"top_frame_idx\":",
+                b.address, b.size, json_str(&b.state), b.address - s.address));
+            emit_frame_idx(j, b.top_frame_idx);
+            j.push('}');
+        }
+        j.push_str("]}");
+    }
+    j.push_str("],");
+
+    // Raw allocator trace events for Allocator State History. Keep this
+    // compact: the UI needs action/addr/size/time and a resolved frame,
+    // not full stacks duplicated per event.
+    j.push_str("\"trace_events\":[");
+    for (i, (action, _device_addr, size, time_us, raw_addr, stack_idx, stream)) in
+        traces.iter().enumerate()
+    {
+        if i > 0 {
+            j.push(',');
+        }
+        let top = resolve_top_frame_from_stack(*stack_idx, pools);
+        j.push_str(&format!("{{\"action\":{},\"addr\":{},\"size\":{},\"stream\":{},\"time_us\":{},\"top_frame_idx\":",
+            json_str(action), raw_addr, size, stream, time_us));
+        emit_frame_idx(j, top);
+        j.push_str(",\"stack_idx\":");
+        let _ = std::fmt::Write::write_fmt(j, format_args!("{}", stack_idx));
+        j.push('}');
+    }
+    j.push(']');
 }
 
 // ---- WASM entry ----
@@ -427,97 +640,44 @@ pub fn parse_intern(data: &[u8], rank: i32, _layout_limit: i32) -> String {
     let mut pools = Pools::new();
     let (segments, traces, meta, uses_event_ord) = parse_snapshot(data, &mut pools);
 
-    let seg_active: i64 = segments.iter()
+    let seg_active: i64 = segments
+        .iter()
         .flat_map(|s| s.blocks.iter())
         .filter(|b| b.state == "active_allocated")
         .map(|b| b.size)
         .sum();
 
-    let (allocs, t_min, t_max, peak, baseline) =
-        build_allocations(&traces, seg_active, &pools);
+    let (allocs, t_min, t_max, peak, baseline) = build_allocations(&traces, seg_active, &pools);
 
     // Sort allocations by size. The UI/layout worker chooses how many
     // of these to render, so "show more/all events" can be handled
     // without reparsing the pickle bytes.
     let mut top_idx: Vec<usize> = (0..allocs.len()).collect();
     top_idx.sort_by(|&a, &b| {
-        allocs[b].size.cmp(&allocs[a].size)
+        allocs[b]
+            .size
+            .cmp(&allocs[a].size)
             .then_with(|| allocs[a].alloc_us.cmp(&allocs[b].alloc_us))
             .then_with(|| allocs[a].addr.cmp(&allocs[b].addr))
     });
 
     let mut j = String::with_capacity(2 * 1024 * 1024);
     j.push('{');
-
-    // Summary
-    let (mut tr, mut ta, mut tac, mut sc, mut bc, mut ab, mut ib) = (0i64,0,0,0usize,0usize,0i64,0i64);
-    for s in &segments {
-        tr += s.total_size; ta += s.allocated_size; tac += s.active_size; sc += 1;
-        for b in &s.blocks { bc += 1; if b.state == "active_allocated" { ab += b.size; } else if b.state == "inactive" { ib += b.size; } }
-    }
-    j.push_str(&format!(
-        "\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib},\"baseline\":{baseline},\"peak_bytes\":{peak},\"alloc_conf\":{},\"expandable_segments\":{},\"max_split_size\":{},\"gc_threshold\":{}}},",
-        json_str(&meta.alloc_conf),
-        meta.expandable_segments,
-        meta.max_split_size,
-        meta.gc_threshold,
-    ));
-    let time_axis = if uses_event_ord { "event_ordinal" } else { "time_us" };
-    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"time_axis\":{},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", json_str(time_axis), allocs.len()));
-
-    // Interned frame pool: [[name, filename, line], ...]
-    j.push_str("\"frame_pool\":[");
-    for (i, f) in pools.frame_pool.iter().enumerate() {
-        if i > 0 { j.push(','); }
-        j.push_str(&format!("[{},{},{}]", json_str(&f.name), json_str(&f.filename), f.line));
-    }
-    j.push_str("],");
-
-    // Interned stack pool: [[frame_idx, ...], ...]
-    j.push_str("\"stack_pool\":[");
-    for (i, stk) in pools.stack_pool.iter().enumerate() {
-        if i > 0 { j.push(','); }
-        j.push('[');
-        for (k, &fidx) in stk.iter().enumerate() {
-            if k > 0 { j.push(','); }
-            let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", fidx));
-        }
-        j.push(']');
-    }
-    j.push_str("],");
-
-    // Segments for treemap / address map.
-    j.push_str("\"segments\":[");
-    for (si, s) in segments.iter().enumerate() {
-        if si > 0 { j.push(','); }
-        j.push_str(&format!("{{\"address\":{},\"total_size\":{},\"allocated_size\":{},\"segment_type\":{},\"stream\":{},\"blocks\":[",
-            s.address, s.total_size, s.allocated_size, json_str(&s.segment_type), s.stream));
-        for (bi, b) in s.blocks.iter().enumerate() {
-            if bi > 0 { j.push(','); }
-            j.push_str(&format!("{{\"address\":{},\"size\":{},\"state\":{},\"offset_in_segment\":{},\"top_frame_idx\":",
-                b.address, b.size, json_str(&b.state), b.address - s.address));
-            emit_frame_idx(&mut j, b.top_frame_idx);
-            j.push('}');
-        }
-        j.push_str("]}");
-    }
-    j.push_str("],");
-
-    // Raw allocator trace events for Allocator State History. Keep this
-    // compact: the UI needs action/addr/size/time and a resolved frame,
-    // not full stacks duplicated per event.
-    j.push_str("\"trace_events\":[");
-    for (i, (action, _device_addr, size, time_us, raw_addr, stack_idx, stream)) in traces.iter().enumerate() {
-        if i > 0 { j.push(','); }
-        let top = resolve_top_frame_from_stack(*stack_idx, &pools);
-        j.push_str(&format!("{{\"action\":{},\"addr\":{},\"size\":{},\"stream\":{},\"time_us\":{},\"top_frame_idx\":",
-            json_str(action), raw_addr, size, stream, time_us));
-        emit_frame_idx(&mut j, top);
-        j.push_str(",\"stack_idx\":");
-        let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", stack_idx));
-        j.push('}');
-    }
-    j.push_str("],");
+    emit_meta_json(
+        &mut j,
+        rank,
+        &segments,
+        &traces,
+        &meta,
+        uses_event_ord,
+        &pools,
+        t_min,
+        t_max,
+        peak,
+        baseline,
+        allocs.len(),
+    );
+    j.push(',');
 
     // Size-sorted allocations: layout-worker input. Each entry carries the
     // minimum scalars needed for polygon layout, strip packing, anomaly
@@ -525,7 +685,9 @@ pub fn parse_intern(data: &[u8], rank: i32, _layout_limit: i32) -> String {
     j.push_str("\"top_allocations\":[");
     for (i, &ai) in top_idx.iter().enumerate() {
         let a = &allocs[ai];
-        if i > 0 { j.push(','); }
+        if i > 0 {
+            j.push(',');
+        }
         j.push_str(&format!("{{\"idx\":{},\"addr\":{},\"size\":{},\"alloc_us\":{},\"free_requested_us\":{},\"free_us\":{},\"top_frame_idx\":",
             i, a.addr, a.size, a.alloc_us, a.free_requested_us, a.free_us));
         emit_frame_idx(&mut j, a.top_frame_idx);
@@ -535,5 +697,132 @@ pub fn parse_intern(data: &[u8], rank: i32, _layout_limit: i32) -> String {
     }
     j.push_str("]");
 
-    j.push('}'); j
+    j.push('}');
+    j
+}
+
+/// Hybrid binary IR v1. Metadata stays as JSON for readability/debugging,
+/// while the largest table (`top_allocations`) is emitted as typed arrays
+/// so workers can transfer it without building/parsing a giant JSON array.
+#[wasm_bindgen]
+pub fn parse_intern_binary(data: &[u8], rank: i32) -> JsValue {
+    let mut pools = Pools::new();
+    let (segments, traces, meta, uses_event_ord) = parse_snapshot(data, &mut pools);
+
+    let seg_active: i64 = segments
+        .iter()
+        .flat_map(|s| s.blocks.iter())
+        .filter(|b| b.state == "active_allocated")
+        .map(|b| b.size)
+        .sum();
+
+    let (allocs, t_min, t_max, peak, baseline) = build_allocations(&traces, seg_active, &pools);
+
+    let mut top_idx: Vec<usize> = (0..allocs.len()).collect();
+    top_idx.sort_by(|&a, &b| {
+        allocs[b]
+            .size
+            .cmp(&allocs[a].size)
+            .then_with(|| allocs[a].alloc_us.cmp(&allocs[b].alloc_us))
+            .then_with(|| allocs[a].addr.cmp(&allocs[b].addr))
+    });
+
+    let mut meta_json = String::with_capacity(2 * 1024 * 1024);
+    meta_json.push('{');
+    emit_meta_json(
+        &mut meta_json,
+        rank,
+        &segments,
+        &traces,
+        &meta,
+        uses_event_ord,
+        &pools,
+        t_min,
+        t_max,
+        peak,
+        baseline,
+        allocs.len(),
+    );
+    meta_json.push('}');
+
+    let n = top_idx.len();
+    let mut addr = Vec::with_capacity(n);
+    let mut size = Vec::with_capacity(n);
+    let mut alloc_us = Vec::with_capacity(n);
+    let mut free_requested_us = Vec::with_capacity(n);
+    let mut free_us = Vec::with_capacity(n);
+    let mut top_frame_idx = Vec::with_capacity(n);
+    let mut stack_idx = Vec::with_capacity(n);
+
+    for &ai in &top_idx {
+        let a = &allocs[ai];
+        addr.push(a.addr as f64);
+        size.push(a.size as f64);
+        alloc_us.push(a.alloc_us as f64);
+        free_requested_us.push(a.free_requested_us as f64);
+        free_us.push(a.free_us as f64);
+        top_frame_idx.push(if a.top_frame_idx == NO_FRAME {
+            -1
+        } else {
+            a.top_frame_idx as i32
+        });
+        stack_idx.push(a.stack_idx as i32);
+    }
+
+    let obj = Object::new();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("kind"),
+        &JsValue::from_str("memviz-ir-v1"),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("metaJson"),
+        &JsValue::from_str(&meta_json),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocAddr"),
+        &Float64Array::from(addr.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocSize"),
+        &Float64Array::from(size.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocAllocUs"),
+        &Float64Array::from(alloc_us.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocFreeRequestedUs"),
+        &Float64Array::from(free_requested_us.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocFreeUs"),
+        &Float64Array::from(free_us.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocTopFrameIdx"),
+        &Int32Array::from(top_frame_idx.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("allocStackIdx"),
+        &Int32Array::from(stack_idx.as_slice()),
+    )
+    .unwrap();
+    obj.into()
 }

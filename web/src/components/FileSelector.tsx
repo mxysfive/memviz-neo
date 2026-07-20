@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useFileStore, WORKER_COUNT_MAX, LAYOUT_LIMIT_OPTIONS } from "../stores/fileStore";
+import { formatBytes } from "../utils";
 
 /**
  * Track pointer position (normalised to −1..1) on CSS custom properties
@@ -37,6 +38,8 @@ export default function FileSelector() {
     openDirectory, openFiles,
     workerCount, setWorkerCount,
     layoutLimit, setLayoutLimit,
+    progress, completedCount, totalCount,
+    bytesLoaded, bytesTotal, activeMs,
   } = useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
   usePointerParallax();
@@ -48,7 +51,19 @@ export default function FileSelector() {
   }, []);
 
   if (status === "loading") {
-    return <LoadingView phase={phase} inFlightRanks={inFlightRanks} poolSize={poolSize} />;
+    return (
+      <LoadingView
+        phase={phase}
+        inFlightRanks={inFlightRanks}
+        poolSize={poolSize}
+        progress={progress}
+        completedCount={completedCount}
+        totalCount={totalCount}
+        bytesLoaded={bytesLoaded}
+        bytesTotal={bytesTotal}
+        activeMs={activeMs}
+      />
+    );
   }
 
   return (
@@ -173,12 +188,26 @@ function LoadingView({
   phase,
   inFlightRanks,
   poolSize,
+  progress,
+  completedCount,
+  totalCount,
+  bytesLoaded,
+  bytesTotal,
+  activeMs,
 }: {
   phase: string;
   inFlightRanks: number[];
   poolSize: number;
+  progress: number;
+  completedCount: number;
+  totalCount: number;
+  bytesLoaded: number;
+  bytesTotal: number;
+  activeMs: number;
 }) {
   const bigLabel = PHASE_BIG[phase] || "LOADING";
+  const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
+  const elapsedS = Math.max(0, Math.floor(activeMs / 1000));
 
   // Render N slots. N = poolSize once known, else a default so the grid
   // doesn't snap in. Align in-flight ranks into the first len slots.
@@ -197,6 +226,20 @@ function LoadingView({
         </div>
 
         <h1 className="fs-phase display">{bigLabel}</h1>
+
+        <div className="fs-progress-wrap" aria-label="Loading progress">
+          <div className="fs-progress-track">
+            <div className="fs-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="fs-progress-meta mono">
+            <span>{pct}%</span>
+            <span>{completedCount}/{totalCount} ranks</span>
+            {bytesTotal > 0 && (
+              <span>{formatBytes(bytesLoaded)} / {formatBytes(bytesTotal)}</span>
+            )}
+            <span>{elapsedS}s</span>
+          </div>
+        </div>
 
         <div className="fs-worker-grid" data-slots={slots}>
           {cells.map((rank, i) => (
@@ -454,8 +497,55 @@ function FsStyle() {
         line-height: 0.86;
         letter-spacing: -0.04em;
         color: var(--fg);
-        margin: 0 0 var(--s7);
+        margin: 0 0 var(--s5);
         white-space: nowrap;
+      }
+
+      .fs-progress-wrap {
+        width: min(900px, 100%);
+        margin-bottom: var(--s6);
+      }
+      .fs-progress-track {
+        position: relative;
+        height: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(250,250,250,0.18);
+        background: rgba(10,10,11,0.62);
+      }
+      .fs-progress-fill {
+        height: 100%;
+        min-width: 2px;
+        background:
+          linear-gradient(90deg, rgba(217,249,157,0.95), rgba(103,232,249,0.82));
+        box-shadow: 0 0 18px rgba(217,249,157,0.22);
+        transition: width 180ms var(--ease);
+      }
+      .fs-progress-track::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          90deg,
+          transparent 0,
+          transparent 16px,
+          rgba(255,255,255,0.08) 16px,
+          rgba(255,255,255,0.08) 24px
+        );
+        animation: fs-progress-stripes 900ms linear infinite;
+      }
+      @keyframes fs-progress-stripes {
+        from { transform: translateX(0); }
+        to { transform: translateX(24px); }
+      }
+      .fs-progress-meta {
+        min-height: 18px;
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        color: var(--fg-muted);
+        font-size: 11px;
+        letter-spacing: 0.04em;
       }
 
       .fs-worker-grid {

@@ -4,10 +4,14 @@
  * an IR JSON string that a layout worker post-processes.
  *
  * Main → Worker: { type: "init", wasmModule }
- * Main → Worker: { type: "parse", rank, buffer }
- *                 // buffer transferred; display limits are applied later
- *                 // by the layout worker so "show more" avoids reparsing.
+ * Main → Worker: { type: "parse", rank, file | buffer }
+ *                 // File is read inside this worker so large snapshots
+ *                 // can report byte progress and avoid main-thread
+ *                 // ArrayBuffer ownership churn. display limits are
+ *                 // applied later by the layout worker so "show more"
+ *                 // avoids reparsing.
  * Worker → Main: { type: "ready" }
+ * Worker → Main: { type: "readProgress", rank, loaded, total, done }
  * Worker → Main: { type: "ir", rank, ir }
  * Worker → Main: { type: "error", rank, error }
  */
@@ -17,7 +21,35 @@ import { initSync, parse_intern } from "../../../wasm/pkg/memviz_wasm.js";
 let wasmModule: WebAssembly.Module | null = null;
 let ready = false;
 
-self.onmessage = (e: MessageEvent) => {
+function readFileWithProgress(file: File, rank: number): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const total = file.size || 0;
+    reader.onprogress = (ev) => {
+      (self as any).postMessage({
+        type: "readProgress",
+        rank,
+        loaded: ev.loaded,
+        total: ev.total || total,
+        done: false,
+      });
+    };
+    reader.onerror = () => reject(reader.error || new Error("File read failed"));
+    reader.onload = () => {
+      (self as any).postMessage({
+        type: "readProgress",
+        rank,
+        loaded: total,
+        total,
+        done: true,
+      });
+      resolve(reader.result as ArrayBuffer);
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+self.onmessage = async (e: MessageEvent) => {
   const { type } = e.data;
 
   if (type === "init") {
@@ -33,9 +65,12 @@ self.onmessage = (e: MessageEvent) => {
   }
 
   if (type === "parse") {
-    const { rank, buffer } = e.data;
+    const { rank, file } = e.data;
+    let { buffer } = e.data;
     try {
       if (!ready || !wasmModule) throw new Error("WASM not initialized");
+      if (!buffer && file) buffer = await readFileWithProgress(file, rank);
+      if (!buffer) throw new Error("No snapshot buffer");
       const t0 = performance.now();
       const ir = parse_intern(new Uint8Array(buffer), rank, 0);
       const wasmMs = performance.now() - t0;

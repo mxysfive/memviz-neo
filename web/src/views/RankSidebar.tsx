@@ -13,6 +13,7 @@ export default function RankSidebar({ onSelectRank }: Props) {
   const currentRank = useDataStore((s) => s.currentRank);
   const completedCount = useFileStore((s) => s.completedCount);
   const totalCount = useFileStore((s) => s.totalCount);
+  const progress = useFileStore((s) => s.progress);
   const maxPeak = useRankSummaries((s) => s.maxPeak);
   const [collapsed, setCollapsed] = useState(false);
   const stillLoading = completedCount < totalCount;
@@ -45,6 +46,11 @@ export default function RankSidebar({ onSelectRank }: Props) {
           {collapsed ? "›" : "‹"}
         </button>
       </div>
+      {!collapsed && stillLoading && (
+        <div className="rank-sidebar-progress" aria-hidden="true">
+          <span style={{ width: `${Math.max(2, Math.min(100, progress * 100))}%` }} />
+        </div>
+      )}
 
       <div className="rank-sidebar-list">
         {allRanks.map((r) => (
@@ -140,6 +146,18 @@ const STYLES = `
     color: var(--fg-faint);
     flex: 0 0 auto;
     min-height: 26px;
+  }
+  .rank-sidebar-progress {
+    height: 3px;
+    background: rgba(255,255,255,0.06);
+    overflow: hidden;
+    flex: 0 0 auto;
+  }
+  .rank-sidebar-progress span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 180ms var(--ease);
   }
   .rank-sidebar-count {
     margin-left: auto;

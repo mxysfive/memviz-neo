@@ -24,6 +24,39 @@ import { parseRank } from "./parseRank";
 
 const irStore = new Map<number, string>();
 
+function extractTopLevelObject(json: string, key: string): string {
+  const keyToken = `"${key}":`;
+  const keyIdx = json.indexOf(keyToken);
+  if (keyIdx < 0) throw new Error(`missing ${key}`);
+  const start = json.indexOf("{", keyIdx + keyToken.length);
+  if (start < 0) throw new Error(`missing ${key} object`);
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < json.length; i++) {
+    const ch = json.charCodeAt(i);
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === 92) {
+        escaped = true;
+      } else if (ch === 34) {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === 34) {
+      inString = true;
+    } else if (ch === 123) {
+      depth++;
+    } else if (ch === 125) {
+      depth--;
+      if (depth === 0) return json.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unterminated ${key} object`);
+}
+
 self.onmessage = (e: MessageEvent) => {
   const { type } = e.data;
 
@@ -33,8 +66,7 @@ self.onmessage = (e: MessageEvent) => {
       // Only pull `summary` out of the IR during load — it's tiny and
       // is all the main thread needs to render the rank selector.
       const t0 = performance.now();
-      const raw = JSON.parse(ir);
-      const summary = raw.summary;
+      const summary = JSON.parse(extractTopLevelObject(ir, "summary"));
       const layoutMs = performance.now() - t0;
       irStore.set(rank, ir);
       (self as any).postMessage({

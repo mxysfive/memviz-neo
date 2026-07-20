@@ -19,7 +19,9 @@ import type { RankData } from "./index";
 
 export interface WorkerTask {
   rank: number;
-  getBuffer: () => Promise<ArrayBuffer>;
+  file?: File;
+  getBuffer?: () => Promise<ArrayBuffer>;
+  size?: number;
 }
 
 export interface RankSummary {
@@ -49,6 +51,10 @@ export interface ProgressSnapshot {
   completed: number;
   inFlight: number;
   total: number;
+  progress: number;
+  bytesLoaded: number;
+  bytesTotal: number;
+  activeMs: number;
   phase: LoadPhase;
   inFlightRanks: number[];
   poolSize: number;
@@ -114,16 +120,48 @@ export function createWorkerPool(
 
     const total = tasks.length;
     const parseBusyRank: number[] = new Array(K).fill(-1);
+    const parseBusyTaskIdx: number[] = new Array(K).fill(-1);
     const layoutBusyRank: number[] = new Array(K).fill(-1);
+    const readLoadedByTask = new Float64Array(total);
+    const readTotalByTask = new Float64Array(total);
+    const readDoneByTask = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+      readTotalByTask[i] = tasks[i].size ?? tasks[i].file?.size ?? 0;
+    }
+    const wallStart = performance.now();
 
     const snap = (completed: number, phase: LoadPhase): ProgressSnapshot => {
       const inFlightRanks: number[] = [];
       for (const r of parseBusyRank) if (r >= 0) inFlightRanks.push(r);
       for (const r of layoutBusyRank) if (r >= 0) inFlightRanks.push(r);
+      let partial = 0;
+      for (let i = 0; i < parseBusyTaskIdx.length; i++) {
+        const taskIdx = parseBusyTaskIdx[i];
+        if (taskIdx < 0) continue;
+        const totalBytes = readTotalByTask[taskIdx];
+        const readFrac = totalBytes > 0
+          ? Math.min(1, readLoadedByTask[taskIdx] / totalBytes)
+          : (readDoneByTask[taskIdx] ? 1 : 0);
+        // File read is observable; pickle decode is a synchronous WASM
+        // call, so hold the bar at a known "decoding" band until the IR
+        // arrives. The worker grid + elapsed time show that work is alive.
+        partial += readDoneByTask[taskIdx] ? 0.55 : readFrac * 0.5;
+      }
+      for (const r of layoutBusyRank) if (r >= 0) partial += 0.85;
+      let bytesLoaded = 0;
+      let bytesTotal = 0;
+      for (let i = 0; i < total; i++) {
+        bytesLoaded += readLoadedByTask[i];
+        bytesTotal += readTotalByTask[i];
+      }
       return {
         completed,
         inFlight: inFlightRanks.length,
         total,
+        progress: Math.min(1, Math.max(0, (completed + partial) / Math.max(1, total))),
+        bytesLoaded,
+        bytesTotal,
+        activeMs: performance.now() - wallStart,
         phase,
         inFlightRanks,
         poolSize: K,
@@ -177,7 +215,9 @@ export function createWorkerPool(
     interface Timing { rank: number; wasmMs: number; irKB: number; layoutMs: number; totalMs: number; }
     const timings = new Map<number, Timing>();
     const startedAt = new Map<number, number>();
-    const wallStart = performance.now();
+    const heartbeat = setInterval(() => {
+      if (!terminated) scheduleProgress(snap(completed, completed >= total ? "done" : "parsing"));
+    }, 1000);
 
     scheduleProgress(snap(0, "parsing"));
 
@@ -192,19 +232,37 @@ export function createWorkerPool(
         while (idleParseWorkers.length > 0 && nextTaskIdx < tasks.length) {
           const worker = idleParseWorkers.shift()!;
           const wIdx = parseWorkers.indexOf(worker);
-          const task = tasks[nextTaskIdx++];
+          const taskIdx = nextTaskIdx++;
+          const task = tasks[taskIdx];
           parseBusyRank[wIdx] = task.rank;
+          parseBusyTaskIdx[wIdx] = taskIdx;
           startedAt.set(task.rank, performance.now());
           scheduleProgress(snap(completed, "parsing"));
-          task.getBuffer().then((buffer) => {
-            worker.postMessage({ type: "parse", rank: task.rank, buffer }, [buffer]);
-          }).catch((err) => {
-            onError(task.rank, `File read failed: ${err}`);
+          if (task.file) {
+            worker.postMessage({ type: "parse", rank: task.rank, file: task.file });
+          } else if (task.getBuffer) {
+            task.getBuffer().then((buffer) => {
+              if (readTotalByTask[taskIdx] <= 0) readTotalByTask[taskIdx] = buffer.byteLength;
+              readLoadedByTask[taskIdx] = buffer.byteLength;
+              readDoneByTask[taskIdx] = 1;
+              scheduleProgress(snap(completed, "parsing"));
+              worker.postMessage({ type: "parse", rank: task.rank, buffer }, [buffer]);
+            }).catch((err) => {
+              onError(task.rank, `File read failed: ${err}`);
+              parseBusyRank[wIdx] = -1;
+              parseBusyTaskIdx[wIdx] = -1;
+              idleParseWorkers.push(worker);
+              dispatchParseIfPossible();
+              maybeFinish();
+            });
+          } else {
+            onError(task.rank, "No file or reader for task");
             parseBusyRank[wIdx] = -1;
+            parseBusyTaskIdx[wIdx] = -1;
             idleParseWorkers.push(worker);
             dispatchParseIfPossible();
             maybeFinish();
-          });
+          }
         }
       }
 
@@ -222,9 +280,26 @@ export function createWorkerPool(
 
       for (const worker of parseWorkers) {
         worker.onmessage = (e: MessageEvent) => timed("parse:msg", () => {
-          const { type, rank, ir, error, wasmMs, irBytes } = e.data;
+          const { type, rank, ir, error, wasmMs, irBytes, loaded, total: readTotal, done } = e.data;
           const wIdx = parseWorkers.indexOf(worker);
+          const taskIdx = parseBusyTaskIdx[wIdx];
+          if (type === "readProgress") {
+            if (taskIdx >= 0) {
+              if (readTotal > 0) readTotalByTask[taskIdx] = readTotal;
+              readLoadedByTask[taskIdx] = Math.max(readLoadedByTask[taskIdx], loaded || 0);
+              if (done) {
+                readDoneByTask[taskIdx] = 1;
+                if (readTotalByTask[taskIdx] > 0) readLoadedByTask[taskIdx] = readTotalByTask[taskIdx];
+              }
+              scheduleProgress(snap(completed, "parsing"));
+            }
+            return;
+          }
           if (type === "ir") {
+            if (taskIdx >= 0) {
+              readDoneByTask[taskIdx] = 1;
+              if (readTotalByTask[taskIdx] > 0) readLoadedByTask[taskIdx] = readTotalByTask[taskIdx];
+            }
             timings.set(rank, {
               rank,
               wasmMs: Math.round(wasmMs),
@@ -234,12 +309,14 @@ export function createWorkerPool(
             });
             layoutQueue.push({ rank, ir });
             parseBusyRank[wIdx] = -1;
+            parseBusyTaskIdx[wIdx] = -1;
             idleParseWorkers.push(worker);
             dispatchParseIfPossible();
             dispatchLayoutIfPossible();
           } else if (type === "error") {
             onError(rank, error);
             parseBusyRank[wIdx] = -1;
+            parseBusyTaskIdx[wIdx] = -1;
             idleParseWorkers.push(worker);
             dispatchParseIfPossible();
             maybeFinish();
@@ -249,6 +326,7 @@ export function createWorkerPool(
           const wIdx = parseWorkers.indexOf(worker);
           onError(-1, `Parse worker crashed: ${e.message}`);
           parseBusyRank[wIdx] = -1;
+          parseBusyTaskIdx[wIdx] = -1;
           idleParseWorkers.push(worker);
           maybeFinish();
         };
@@ -299,6 +377,7 @@ export function createWorkerPool(
 
       dispatchParseIfPossible();
     });
+    clearInterval(heartbeat);
 
     const wallMs = Math.round(performance.now() - wallStart);
     const rows = [...timings.values()].sort((a, b) => a.rank - b.rank);

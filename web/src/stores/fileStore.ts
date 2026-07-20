@@ -9,7 +9,13 @@ import {
 } from "../compute/workerPool";
 import { setSummary as cacheSetSummary, clearSummaries } from "./rankStore";
 
-type FileReader = () => Promise<ArrayBuffer>;
+type SnapshotReader = () => Promise<ArrayBuffer>;
+type SnapshotEntry = {
+  name: string;
+  file?: File;
+  reader?: SnapshotReader;
+  size?: number;
+};
 
 // Active pool lives until the next dataset is loaded or reset is called.
 // Kept around so rank-switch requestFull() can talk to the worker that
@@ -62,6 +68,9 @@ interface FileState {
   totalCount: number;
   inFlightRanks: number[];
   poolSize: number;
+  bytesLoaded: number;
+  bytesTotal: number;
+  activeMs: number;
   workerCount: number;
   layoutLimit: number;
   error: string | null;
@@ -89,6 +98,9 @@ export const useFileStore = create<FileState>((set) => ({
   totalCount: 0,
   inFlightRanks: [],
   poolSize: 0,
+  bytesLoaded: 0,
+  bytesTotal: 0,
+  activeMs: 0,
   workerCount: workerCountPref.load(),
   layoutLimit: layoutLimitPref.load(),
   error: null,
@@ -97,7 +109,7 @@ export const useFileStore = create<FileState>((set) => ({
   openDirectory: async () => {
     try {
       const dirHandle = await (window as any).showDirectoryPicker();
-      const entries: { name: string; reader: FileReader }[] = [];
+      const entries: SnapshotEntry[] = [];
       const stack: any[] = [dirHandle];
       while (stack.length > 0) {
         const dir = stack.pop();
@@ -106,7 +118,8 @@ export const useFileStore = create<FileState>((set) => ({
             stack.push(entry);
           } else if (entry.kind === "file" && entry.name.endsWith(".pickle")) {
             const handle = entry;
-            entries.push({ name: entry.name, reader: async () => (await handle.getFile()).arrayBuffer() });
+            const file = await handle.getFile();
+            entries.push({ name: entry.name, file, size: file.size });
           }
         }
       }
@@ -120,7 +133,7 @@ export const useFileStore = create<FileState>((set) => ({
   openFiles: async (fileList: FileList) => {
     const entries = Array.from(fileList)
       .filter((f) => f.name.endsWith(".pickle"))
-      .map((f) => ({ name: f.name, reader: () => f.arrayBuffer() }));
+      .map((f) => ({ name: f.name, file: f, size: f.size }));
     await loadAllParallel(entries, set);
   },
 
@@ -152,6 +165,9 @@ export const useFileStore = create<FileState>((set) => ({
       totalCount: 0,
       inFlightRanks: [],
       poolSize: 0,
+      bytesLoaded: 0,
+      bytesTotal: 0,
+      activeMs: 0,
       error: null,
       ranks: [],
     });
@@ -164,7 +180,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
       urls.map(async (url) => {
         const name = url.split("/").pop() || url;
         const buf = await (await fetch(url)).arrayBuffer();
-        return { name, reader: async () => buf };
+        return { name, reader: async () => buf, size: buf.byteLength };
       }),
     );
     const set = (partial: Partial<FileState>) => useFileStore.setState(partial);
@@ -173,13 +189,19 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
 }
 
 async function loadAllParallel(
-  entries: { name: string; reader: FileReader }[],
+  entries: SnapshotEntry[],
   set: (partial: Partial<FileState>) => void,
 ) {
   if (entries.length === 0) { set({ status: "error", error: "No .pickle files found" }); return; }
 
   const items = entries
-    .map((e) => ({ rank: extractRank(e.name), name: e.name, reader: e.reader }))
+    .map((e) => ({
+      rank: extractRank(e.name),
+      name: e.name,
+      file: e.file,
+      reader: e.reader,
+      size: e.size ?? e.file?.size,
+    }))
     .sort((a, b) => a.rank - b.rank);
 
   clearSummaries();
@@ -193,13 +215,18 @@ async function loadAllParallel(
     totalCount: items.length,
     inFlightRanks: [],
     poolSize: 0,
+    bytesLoaded: 0,
+    bytesTotal: items.reduce((sum, i) => sum + (i.size ?? 0), 0),
+    activeMs: 0,
     error: null,
     ranks: items.map((i) => i.rank),
   });
 
   const tasks: WorkerTask[] = items.map((i) => ({
     rank: i.rank,
+    file: i.file,
     getBuffer: i.reader,
+    size: i.size,
   }));
 
   let firstDone = false;
@@ -222,13 +249,16 @@ async function loadAllParallel(
     },
     (snap: ProgressSnapshot) => {
       set({
-        progress: snap.completed / snap.total,
+        progress: snap.progress,
         phase: snap.phase,
         completedCount: snap.completed,
         inFlightCount: snap.inFlight,
         totalCount: snap.total,
         inFlightRanks: snap.inFlightRanks,
         poolSize: snap.poolSize,
+        bytesLoaded: snap.bytesLoaded,
+        bytesTotal: snap.bytesTotal,
+        activeMs: snap.activeMs,
       });
     },
     { poolSize: desiredWorkers },
@@ -240,6 +270,6 @@ async function loadAllParallel(
   if (!firstDone) {
     set({ status: "error", error: "All ranks failed to parse", progress: 1 });
   } else {
-    set({ progress: 1 });
+    set({ progress: 1, bytesLoaded: useFileStore.getState().bytesTotal });
   }
 }
